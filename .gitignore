@@ -24,3 +24,4 @@ examples/runlog.json
 *.local
 secrets.*
 commands.txt
+examples/full_report.svg
