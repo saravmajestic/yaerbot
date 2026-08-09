@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sowing Advisor — yaerbot</title>
+<style>
+  :root{
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#262d38;
+    --ink:#e6edf3; --muted:#8b949e; --accent:#388bfd; --good:#3fb950;
+    --warn:#d29922; --danger:#f85149; --keezh:#3fb950;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       height:100dvh;display:flex;flex-direction:column}
+  header{padding:14px 18px;background:var(--surface);border-bottom:1px solid var(--border);
+          display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;font-weight:700}
+  header .sub{font-size:12px;color:var(--muted)}
+  header select{margin-left:auto;background:var(--surface2);color:var(--ink);border:1px solid var(--border);
+                border-radius:8px;padding:6px 8px;font-size:12px}
+  .chat{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:min(680px,92%);padding:12px 14px;border-radius:14px;font-size:14px;line-height:1.5}
+  .msg.user{align-self:flex-end;background:#1f6feb;color:#fff;border-bottom-right-radius:4px;white-space:pre-wrap}
+  .msg.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--border);border-bottom-left-radius:4px}
+  .msg.bot .prose{white-space:pre-wrap;margin-bottom:10px}
+  /* recommendation card */
+  .card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:8px}
+  .rec-date{font-size:22px;font-weight:800;color:var(--ink);font-variant-numeric:tabular-nums}
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:3px 9px;
+         border-radius:999px;margin-left:8px;vertical-align:middle}
+  .badge.agree{background:#0f2417;color:var(--good);border:1px solid #238636}
+  .badge.single{background:#241f0f;color:var(--warn);border:1px solid #6b5314}
+  .row{display:flex;gap:8px;font-size:13px;margin-top:10px;color:var(--muted)}
+  .row b{color:var(--ink);font-weight:600}
+  .row .ico{width:20px;text-align:center}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
+  .chip{font-size:12px;padding:3px 9px;border-radius:999px;background:#0d1117;border:1px solid var(--border);
+        color:var(--ink);font-variant-numeric:tabular-nums}
+  .chip.avoid{color:var(--danger);border-color:#5b1a17;background:#2a1210}
+  .chip.pan{border-color:#243a52}
+  .chip.bio{border-color:#1f4a2c}
+  .tag{font-size:10px;font-weight:700;padding:1px 6px;border-radius:5px;margin-left:6px;letter-spacing:.4px}
+  .tag.real{background:#0f2417;color:var(--good)}
+  .tag.mock{background:#241f0f;color:var(--warn)}
+  .divider{height:1px;background:var(--border);margin:12px 0}
+  .label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:4px}
+  /* input */
+  .composer{padding:12px 16px;background:var(--surface);border-top:1px solid var(--border)}
+  .quick{display:flex;gap:6px;margin-bottom:10px}
+  .quick button{background:var(--surface2);border:1px solid var(--border);color:var(--ink);border-radius:999px;
+                padding:6px 12px;font-size:12px;cursor:pointer}
+  .quick button:hover{border-color:var(--accent)}
+  .inp{display:flex;gap:8px}
+  .inp input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--ink);border-radius:10px;
+             padding:11px 12px;font-size:14px}
+  .inp button{background:var(--accent);color:#fff;border:none;border-radius:10px;padding:0 18px;font-weight:700;cursor:pointer}
+  .inp button:disabled{opacity:.5;cursor:default}
+  .dots{display:inline-flex;gap:3px}.dots i{width:6px;height:6px;background:var(--muted);border-radius:50%;animation:b 1s infinite}
+  .dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+  @keyframes b{0%,60%,100%{opacity:.3}30%{opacity:1}}
+</style>
+</head>
+<body>
+  <header>
+    <h1>🌱 Sowing Advisor</h1>
+    <span class="sub">Tamil panchangam + biodynamic calendar · Salem, TN</span>
+    <select id="model" title="LLM model">
+      <option value="gemma2:2b">Gemma 2B</option>
+      <option value="qwen2.5:1.5b">Qwen 1.5B</option>
+    </select>
+  </header>
+
+  <div class="chat" id="chat"></div>
+
+  <div class="composer">
+    <div class="quick" id="quick"></div>
+    <div class="inp">
+      <input id="text" placeholder="Which crop do you want to plant? (e.g. groundnut)" autocomplete="off">
+      <button id="send">Send</button>
+    </div>
+  </div>
+
+<script>
+const chat=document.getElementById('chat'), input=document.getElementById('text'),
+      sendBtn=document.getElementById('send'), quick=document.getElementById('quick'),
+      modelSel=document.getElementById('model');
+
+["groundnut","corn","sesame"].forEach(c=>{
+  const b=document.createElement('button'); b.textContent=c;
+  b.onclick=()=>{input.value=c; send();}; quick.appendChild(b);
+});
+
+function bubble(cls){const d=document.createElement('div');d.className='msg '+cls;chat.appendChild(d);
+  chat.scrollTop=chat.scrollHeight;return d;}
+
+function chips(arr,cls){return arr.length
+  ? `<div class="chips">${arr.map(d=>`<span class="chip ${cls}">${d}</span>`).join('')}</div>`
+  : `<div class="chips"><span class="chip" style="color:var(--muted)">none in window</span></div>`;}
+
+function card(p){
+  const agree = p.both_agree
+    ? `<span class="badge agree">✓ both calendars agree</span>`
+    : `<span class="badge single">single system</span>`;
+  const pr = p.price ? `${p.price.current.price.toLocaleString()} ₹/qtl (${p.price.recent_trend}, YoY ${p.price.yoy_change_pct}%)` : '—';
+  let wx = '—';
+  if(p.weather){ wx = `${p.weather.avg_tmax_c}/${p.weather.avg_tmin_c}°C, ${p.weather.total_rain_mm}mm over ${p.weather.rainy_days} rainy days`
+      + (p.weather.recommended_in_horizon===false ? ` <span style="color:var(--muted)">(sowing date beyond 16-day forecast)</span>`:''); }
+  return `<div class="card">
+    <div><span class="rec-date">${p.recommended_date||'—'}</span>${agree}</div>
+    <div class="row"><span class="ico">🕉</span><span>Panchangam: <b>${p.nakshatra||'—'} (${p.nakshatra_tamil||''})</b> → ${p.needs.nokku} nokku</span></div>
+    <div class="row"><span class="ico">🌿</span><span>Biodynamic: <b>${p.needs.biodynamic} day</b></span></div>
+    <div class="divider"></div>
+    <div class="label">Alternatives — panchangam only (Keezh)</div>${chips(p.alternatives.panchangam,'pan')}
+    <div class="label" style="margin-top:8px">Alternatives — biodynamic only (root)</div>${chips(p.alternatives.biodynamic,'bio')}
+    <div class="label" style="margin-top:8px">Avoid — கரி நாள்</div>${chips(p.avoid_days,'avoid')}
+    <div class="divider"></div>
+    <div class="row"><span class="ico">💰</span><span>Price <span class="tag mock">MOCK</span> <b>${pr}</b></span></div>
+    <div class="row"><span class="ico">🌦</span><span>Weather <span class="tag real">LIVE</span> <b>${wx}</b></span></div>
+  </div>`;
+}
+
+async function send(){
+  const q=input.value.trim(); if(!q) return;
+  input.value=''; sendBtn.disabled=true;
+  bubble('user').textContent=q;
+  const b=bubble('bot'); b.innerHTML=`<span class="dots"><i></i><i></i><i></i></span>`;
+  try{
+    const r=await fetch('/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:q, model:modelSel.value})});
+    const p=await r.json();
+    if(p.error==='unknown_crop'){
+      b.innerHTML=`<div class="prose">I can advise on: ${p.known_crops.join(', ')}. Which one?</div>`;
+    }else if(p.error){
+      b.innerHTML=`<div class="prose">Sorry — ${p.error}</div>`;
+    }else{
+      b.innerHTML=`<div class="prose">${p.text.replace(/</g,'&lt;')}</div>`+card(p);
+    }
+  }catch(e){ b.innerHTML=`<div class="prose">Network error: ${e}</div>`; }
+  chat.scrollTop=chat.scrollHeight; sendBtn.disabled=false; input.focus();
+}
+sendBtn.onclick=send;
+input.addEventListener('keydown',e=>{if(e.key==='Enter')send();});
+bubble('bot').innerHTML=`<div class="prose">Hi! Tell me what you want to plant and I'll check the `
+  +`Tamil panchangam (Nokku Naal) and the biodynamic calendar, then recommend a sowing date `
+  +`with alternatives. Try “groundnut”.</div>`;
+input.focus();
+</script>
+</body>
+</html>

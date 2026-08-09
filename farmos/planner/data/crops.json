@@ -42,5 +42,27 @@
     "soil_temp_c": [20, 28],
     "commodity": "Sunflower",
     "note": "Flowering crop — Mel Nokku, flower day."
+  },
+  "corn": {
+    "nokku": "mel",
+    "biodynamic": "fruit",
+    "row_gap_m": 0.60,
+    "seed_gap_m": 0.20,
+    "seeds_per_spot": 1,
+    "sow_months": [1, 2, 6, 7],
+    "soil_temp_c": [21, 30],
+    "commodity": "Corn",
+    "note": "Above-ground grain — Mel Nokku, biodynamic fruit/seed day."
+  },
+  "sesame": {
+    "nokku": "mel",
+    "biodynamic": "fruit",
+    "row_gap_m": 0.30,
+    "seed_gap_m": 0.10,
+    "seeds_per_spot": 1,
+    "sow_months": [6, 7, 8],
+    "soil_temp_c": [25, 32],
+    "commodity": "Sesame",
+    "note": "Above-ground oilseed — Mel Nokku, biodynamic fruit/seed day."
   }
 }

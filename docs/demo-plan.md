@@ -20,8 +20,8 @@
 | Surface | **Real, prepped land** (weed-cleared, ~level), recorded outdoors in flat light |
 | Drip detection | **On-device trained model (Edge Impulse FOMO) PRIMARY** + classical CV fallback — this is the on-device "Physical AI" claim |
 | Vision toolchain | Existing **capture flow → Edge Impulse FOMO → deploy via App Lab `object_detection` brick** (confirmed by `emitter_ml.py`) |
-| Planner brain | **Small Qwen instruct (~1.5B) via Ollama** on the UNO Q Linux side (tool-calling; Gemma E2B = frugal fallback, Llama-3.2-1B = "too slow" escape). Runs **staggered** with vision (never concurrent) — matches Arduino's "occasional reasoning layer" guidance. Exact tag pending on-board `free -m` + latency check |
-| Planner data | Biodynamic calendar + mandi prices (Agmarknet) + weather = **real data pipeline, cached to JSON** for recording reliability; model reasons over it (never "remembers" dates/prices) |
+| Planner brain | **Gemma 2B via Ollama** (staggered with vision, never concurrent). Reconciliation is deterministic; the LLM only **presents** the computed data (`data-in→prose-out`) — agentic tool-calling at ≤2B proved unreliable. Qwen 1.5B = fallback. Exact tag pending on-board `free -m`/latency |
+| Planner data | Two **real** calendars cached (Tamil panchangam Nokku Naal + biodynamic root/leaf/flower/fruit) + **real** weather (Open-Meteo). Prices are **MOCK for now** (real Agmarknet stubbed). Reconciliation computes dates; the model never invents them |
 | Plain-field spacing | **Timed dead-reckoning** (no new hardware, no pins), calibrated on the plot; report logs the executed path. Trailing-wheel encoder = optional stretch |
 | Drip spacing | **Model-driven** — plant at each detected emitter (no odometry needed) |
 | Report | **Generated from logged positions** (plain: commanded path; drip: emitter detections) |
@@ -79,7 +79,7 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [✅] **LLM presentation** (`llm.present()`, data-in→prose-out): the LLM presents the computed data + alternatives; dates come from the reconciliation, not the model. **Gemma 2B > Qwen 1.5B** at faithful presentation (Qwen fudged alternatives; agentic tool-calling at ≤2B is unreliable — kept `converse()` but not the demo path).
 - [🟡] **Prices**: MOCK 3-yr monthly history (groundnut/corn/sesame, `prices_mock.json`) wired into the presentation; real Agmarknet (data.gov.in) path stubbed for a one-line swap
 - [✅] **Weather**: REAL — live Open-Meteo (no API key) with cache-fallback; near-term outlook + honest horizon flag (climatological normals for a date >16 days out = follow-up). Farm = Salem, TN
-- [⬜] **Chat tab** in the operator console (later: voice)
+- [🟡] **Chat/Plan tab**: standalone prototype built (`webchat/` — chat UI + server calling the planner + Gemma, dark console theme); integrate into the operator console as a tab next (later: voice)
 - [⬜] On the UNO Q: install Ollama, copy the Gemma/Qwen blobs, measure `free -m` + tok/s, lock the tag
 
 ### B2 — Path planning + spacing (Act 2)
