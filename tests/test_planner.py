@@ -57,6 +57,18 @@ def test_survey_returns_all_buckets():
     assert "2026-08-15" in b_only   # Aug 15 is a biodynamic root day but not Keezh Nokku
 
 
+def test_price_summary_mock():
+    from farmos.planner import price_summary
+    p = price_summary("groundnut")
+    assert p["mock"] is True                       # loudly flagged as mock
+    assert p["current"]["month"] == "2026-08" and p["current"]["price"] > 0
+    assert p["history_span"][0] == "2023-01"       # 3+ years of monthly history
+    assert len(p["recent_12_months"]) == 12
+    assert p["yoy_change_pct"] is not None
+    for crop in ("groundnut", "corn", "sesame"):
+        assert price_summary(crop)["current"]["price"] > 0
+
+
 def test_llm_tool_loop_with_stub():
     from farmos.planner.llm import converse, StubLLMClient
     trace = []

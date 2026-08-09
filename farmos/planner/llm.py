@@ -63,24 +63,30 @@ class StubLLMClient:
 
 
 PRESENT_SYSTEM = (
-    "You are a sowing advisor for a Tamil Nadu farmer. You are GIVEN a completed analysis of "
-    "sowing days (JSON) — do not compute or invent anything. Present it to the farmer in simple "
-    "language: (1) the RECOMMENDED date(s) where BOTH the panchangam (Nokku Naal) and the "
-    "biodynamic calendar agree and it is not a kari-naal avoid day; (2) ALTERNATIVES — "
-    "panchangam-only and biodynamic-only dates — if they must sow sooner or prefer one tradition; "
-    "(3) the avoid days to skip. Use ONLY the exact dates present in the data. If a list is empty, "
+    "You are a sowing advisor for a Tamil Nadu farmer. You are GIVEN completed analysis data "
+    "(JSON) — do not compute or invent anything. Present it in simple language: (1) the "
+    "RECOMMENDED date(s) where BOTH the panchangam (Nokku Naal) and the biodynamic calendar "
+    "agree and it is not a kari-naal avoid day; (2) ALTERNATIVES — panchangam-only and "
+    "biodynamic-only dates — if they must sow sooner or prefer one tradition; (3) the avoid days "
+    "to skip; (4) if market-price context is given, one short line on the price trend (note it is "
+    "indicative). Use ONLY the exact dates and numbers present in the data. If a list is empty, "
     "say so. Keep it short and friendly."
 )
 
 
-def present(llm, question: str, survey_data: dict) -> str:
-    """Data-in -> prose-out: hand the deterministic survey to the model to phrase for the farmer.
+def present(llm, question: str, survey_data: dict,
+            price: dict | None = None, weather: dict | None = None) -> str:
+    """Data-in -> prose-out: hand the deterministic analysis to the model to phrase for the farmer.
 
-    The dates all come from `survey_data`; the model only presents them. This is the reliable
-    path for small local models (they narrate given facts rather than driving tools + picking)."""
-    user = (f"Farmer's question: {question}\n\n"
-            f"Analysis data (use only these dates):\n{json.dumps(survey_data, ensure_ascii=False)}\n\n"
-            f"Now present the recommendation and alternatives to the farmer.")
+    All dates/numbers come from the passed-in data; the model only presents them. This is the
+    reliable path for small local models (they narrate given facts rather than driving tools)."""
+    blocks = [f"Sowing-day analysis (use only these dates):\n{json.dumps(survey_data, ensure_ascii=False)}"]
+    if price is not None:
+        blocks.append(f"Market price context (INDICATIVE / mock for now):\n{json.dumps(price, ensure_ascii=False)}")
+    if weather is not None:
+        blocks.append(f"Weather forecast:\n{json.dumps(weather, ensure_ascii=False)}")
+    user = (f"Farmer's question: {question}\n\n" + "\n\n".join(blocks)
+            + "\n\nNow present the recommendation and alternatives to the farmer.")
     msg = llm.chat([{"role": "system", "content": PRESENT_SYSTEM},
                     {"role": "user", "content": user}], [])
     return msg.get("content", "")

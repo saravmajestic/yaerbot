@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from farmos.planner import survey, recommend
+from farmos.planner import survey, recommend, price_summary
 from farmos.planner.llm import present, OllamaClient
 
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "qwen2.5:1.5b"
@@ -24,15 +24,18 @@ def main() -> None:
     # ── deterministic reconciliation (authoritative) ──
     data = survey("groundnut", after=AFTER)
     rec = recommend("groundnut", after=AFTER)
+    price = price_summary("groundnut")   # MOCK for now
     print("── deterministic reconciliation (ground truth) ──")
     print(f"recommended (both agree): {rec.recommended_date}")
     print(f"panchangam-only alts: {[r['date'] for r in data['panchangam_only']][:5]}")
     print(f"biodynamic-only alts: {[r['date'] for r in data['biodynamic_only']][:5]}")
-    print(f"avoid days: {data['avoid_days_kari_naal']}\n")
+    print(f"avoid days: {data['avoid_days_kari_naal']}")
+    print(f"price (MOCK): {price['current']['price']} {price['unit']} @ {price['current']['month']}, "
+          f"YoY {price['yoy_change_pct']}%, trend {price['recent_trend']}\n")
 
     # ── LLM presents that data to the farmer ──
     print(f"── {MODEL} presenting to the farmer ──")
-    print(present(OllamaClient(MODEL), QUESTION, data))
+    print(present(OllamaClient(MODEL), QUESTION, data, price=price))
 
 
 if __name__ == "__main__":
