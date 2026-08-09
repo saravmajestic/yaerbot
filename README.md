@@ -33,4 +33,18 @@ the demo plan. Code is copied in module-by-module as each act is built.
 ## Repo layout (populated as the demo is built)
 ```
 docs/         project docs — start with demo-plan.md
+farmos/       software brain (hardware-free, testable off the robot)
+  config.py     SeedPlan — the run config
+  path.py       boustrophedon path planner (Act 2)
+  robot_io.py   RobotIO interface: SimRobot (sim) + BridgeRobot (real UNO Q)
+  executor.py   timed dead-reckoning executor + RunLog (Act 2)
+  report.py     RunLog -> SVG farm-map report (Act 4)
+tests/        unit tests (run: python tests/test_*.py)
+examples/     plain_field_demo.py — config -> path -> sim -> log -> report.svg
+```
+
+## Try it (no hardware)
+```
+python examples/plain_field_demo.py   # writes examples/report.svg + runlog.json
+python tests/test_path.py && python tests/test_executor.py && python tests/test_report.py
 ```

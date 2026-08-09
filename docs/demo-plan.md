@@ -80,10 +80,10 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [⬜] **Planner orchestration**: tool-calling over the cached data → crop/date/spacing recommendation + rationale (feeds Act 2 config and Act 4 report)
 
 ### B2 — Path planning + spacing (Act 2)
-- [🟡] **Timed space-based seeding mode** exists in the Seed panel (gap × speed, single-spot) — *not yet a multi-row path executor*
-- [⬜] **Boustrophedon planner**: plot dims + spacing → row/waypoint plan (real computed path, not canned)
-- [⬜] **Timed dead-reckoning executor**: drive the plan, plant at intervals, **log each seed position**
-- [⬜] Calibrate seconds-per-foot on the actual plot at demo speed
+- [🟡] **Timed space-based seeding mode** exists in the Seed panel (gap × speed, single-spot) — *superseded by the path executor below*
+- [✅] **Boustrophedon planner** — `farmos/path.py`: plot dims + spacing → serpentine seed waypoints (computed, axis-aligned; unit-tested)
+- [🟡] **Timed dead-reckoning executor** — `farmos/executor.py`: drives the plan over a `RobotIO`, logs planned vs executed positions + stats. **`SimRobot` done & tested**; **`BridgeRobot` (real UNO Q) built but untested on hardware**
+- [⬜] Calibrate seconds-per-metre + turn rate on the actual plot at demo speed (feeds `BridgeRobot`)
 
 ### B3 — Vision / on-device model (Act 3)
 - [✅] Classical CV — `detect_tube` (Canny→Hough→steering) + `detect_emitter` (offline-tested 4/4, 3/3)
@@ -98,7 +98,7 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [⬜] **Field-tune** classical CV fallback thresholds against real footage
 
 ### B4 — Report (Act 4)
-- [⬜] **Report generator**: logged seed positions → pictorial farm map (plot, dots, spacing, count) + Act-1 rationale
+- [✅] **Report generator** — `farmos/report.py`: RunLog → self-contained **SVG farm map** (plot, boustrophedon path, planned vs planted dots, spacing/drift stats, planner rationale); unit-tested
 - [⬜] Report view/export in the UI
 
 ### Supporting (already done)

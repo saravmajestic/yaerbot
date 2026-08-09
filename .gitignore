@@ -12,6 +12,10 @@ node_modules/
 captures/
 *.eim
 
+# Generated demo outputs (regenerate with examples/plain_field_demo.py)
+examples/report.svg
+examples/runlog.json
+
 # OS / editor
 .DS_Store
 *.swp
