@@ -1,0 +1,18 @@
+[Unit]
+Description=yaerbot planner service (Act 1 sowing advisor)
+After=ollama.service network-online.target
+Wants=ollama.service
+
+[Service]
+User=arduino
+Group=arduino
+Environment=HOME=/home/arduino
+Environment=PLANNER_HOST=0.0.0.0
+Environment=PLANNER_MODEL=qwen2.5:1.5b
+WorkingDirectory=/home/arduino/yaerbot
+ExecStart=/usr/bin/python3 /home/arduino/yaerbot/webchat/server.py 8765
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

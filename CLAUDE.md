@@ -64,12 +64,18 @@ This file documents how the on-board pieces fit together and how to run/deploy t
   ssh unoq 'docker restart motor-control-main-1'
   ```
 
-## Start-up dependency + TODO
+## Start-up (autostart on boot)
 - Order: **Ollama → planner → console**. The Plan tab needs the planner (:8765); the planner
   needs Ollama (:11434).
-- **All three are currently `nohup` processes — they do NOT survive a reboot.** For the recorded
-  demo, either restart them in order after boot, or (TODO) make Ollama + the planner **systemd
-  services** so they autostart. Pre-warm the model before recording.
+- **Ollama + planner run as systemd services** (`deploy/systemd/*.service`), enabled to start on
+  boot. Install/reinstall on the board:
+  ```bash
+  scp -r deploy unoq:~/yaerbot/ && ssh unoq 'sudo bash ~/yaerbot/deploy/install-services.sh'
+  ```
+  Manage: `systemctl {status,restart} ollama yaerbot-planner` · logs: `journalctl -u <svc> -f`.
+- The **console** autostarts already (App Lab docker app, restart policy).
+- So the whole stack recovers after a power-cycle. Still **pre-warm the model** before recording
+  (one request) so the first on-camera answer isn't the ~15 s cold-load.
 
 ## References
 - Demo storyboard + build status: `docs/demo-plan.md`
