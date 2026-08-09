@@ -6,10 +6,10 @@ biodynamic_cache.json, crops.json.
 """
 from .almanac import day_detail, find_dual_favorable, nokku_for, biodynamic_for, is_avoid
 from .crops import Crop, get_crop, known_crops
-from .planner import Recommendation, recommend
+from .planner import Recommendation, recommend, survey
 
 __all__ = [
-    "recommend", "Recommendation",
+    "recommend", "Recommendation", "survey",
     "get_crop", "Crop", "known_crops",
     "day_detail", "find_dual_favorable", "nokku_for", "biodynamic_for", "is_avoid",
 ]

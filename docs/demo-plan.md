@@ -74,10 +74,12 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 ## Track B — Software Demo (planner, path, model, report)
 
 ### B1 — Planner (Act 1)
-- [⬜] Install **Ollama** on the UNO Q; pull small Qwen; measure `free -m` + tokens/sec, lock the tag
+- [✅] **Data pipeline (calendars)**: Tamil panchangam (nakshatra→Nokku Naal) + biodynamic root/leaf/flower/fruit — real data cached to JSON (`farmos/planner/data/`)
+- [✅] **Reconciliation**: `planner.survey()` returns the full picture (both-systems recommendation + panchangam-only / biodynamic-only alternatives + kari-naal avoid days); `recommend()` picks the dual-validated date. groundnut→2026-09-03. Tested.
+- [✅] **LLM presentation** (`llm.present()`, data-in→prose-out): the LLM presents the computed data + alternatives; dates come from the reconciliation, not the model. **Gemma 2B > Qwen 1.5B** at faithful presentation (Qwen fudged alternatives; agentic tool-calling at ≤2B is unreliable — kept `converse()` but not the demo path).
+- [⬜] **Prices + weather**: pull Agmarknet + IMD and cache (deferred — not fabricated)
 - [⬜] **Chat tab** in the operator console (later: voice)
-- [⬜] **Data pipeline**: biodynamic-calendar lookup + Agmarknet prices + weather, **cached to JSON**
-- [⬜] **Planner orchestration**: tool-calling over the cached data → crop/date/spacing recommendation + rationale (feeds Act 2 config and Act 4 report)
+- [⬜] On the UNO Q: install Ollama, copy the Gemma/Qwen blobs, measure `free -m` + tok/s, lock the tag
 
 ### B2 — Path planning + spacing (Act 2)
 - [🟡] **Timed space-based seeding mode** exists in the Seed panel (gap × speed, single-spot) — *superseded by the path executor below*

@@ -43,6 +43,30 @@ def test_to_seed_plan_carries_crop_geometry():
     assert sp.recommended_date == "2026-09-03"
 
 
+def test_survey_returns_all_buckets():
+    from farmos.planner import survey
+    s = survey("groundnut", after="2026-08-10", horizon_days=40)
+    assert s["needs"] == {"nokku": "keezh", "biodynamic": "root"}
+    assert "2026-09-03" in [r["date"] for r in s["recommended_both_systems"]]
+    assert "2026-08-13" in s["avoid_days_kari_naal"]                 # Keezh but avoid -> excluded
+    # single-system alternatives exist and are disjoint from the both-systems list
+    rec_dates = {r["date"] for r in s["recommended_both_systems"]}
+    p_only = {r["date"] for r in s["panchangam_only"]}
+    b_only = {r["date"] for r in s["biodynamic_only"]}
+    assert rec_dates.isdisjoint(p_only) and rec_dates.isdisjoint(b_only)
+    assert "2026-08-15" in b_only   # Aug 15 is a biodynamic root day but not Keezh Nokku
+
+
+def test_llm_tool_loop_with_stub():
+    from farmos.planner.llm import converse, StubLLMClient
+    trace = []
+    text, msgs = converse(StubLLMClient(crop="groundnut", after="2026-08-10"),
+                          "When should I sow groundnut?", trace=trace)
+    assert "2026-09-03" in text
+    assert any(t["tool"] == "survey_sowing_window" for t in trace)
+    assert trace[0]["result"]["recommended_both_systems"][0]["date"] == "2026-09-03"
+
+
 def test_unknown_crop_raises():
     try:
         get_crop("banana")

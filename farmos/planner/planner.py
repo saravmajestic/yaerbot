@@ -1,16 +1,16 @@
-"""Rule-based planner (Act 1) — the authoritative, deterministic recommendation.
+"""Rule-based planner (Act 1) — reconciles the two real calendars.
 
-It reconciles the two real calendars: it recommends the earliest date on/after the
-requested start that is favourable in BOTH the Tamil panchangam (the crop's required
-Nokku Naal) AND the biodynamic calendar (the crop's day-type), and is not a கரி நாள்
-(avoid) day. The concrete outputs (date, spacing) come from data + rules — never invented.
+`survey()` returns the FULL picture for a crop over a window — the both-systems-agree
+recommendation PLUS single-system alternatives and the கரி நாள் avoid days — so the LLM
+layer can present the recommendation and let the farmer choose an alternative.
 
-The LLM layer (llm.py / tools.py) drives these same tools and turns this into a
-natural-language conversation, but the numbers a farmer acts on come from here.
+`recommend()` is the deterministic pick (earliest both-agree, non-avoid day) built on
+top of the survey, and `Recommendation.to_seed_plan()` hands off to Act 2. The concrete
+dates/spacing come from data + rules — never invented.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 from . import almanac
@@ -19,6 +19,48 @@ from .crops import get_crop
 _NOKKU_LABEL = {"keezh": "Keezh Nokku (downward — root/tuber sowing)",
                 "sama": "Sama Nokku (level)",
                 "mel": "Mel Nokku (upward — above-ground)"}
+
+
+def _brief(det: almanac.DayDetail) -> dict:
+    return {"date": det.date, "nakshatra": det.nakshatra, "nakshatra_tamil": det.nakshatra_tamil,
+            "nokku": det.nokku, "biodynamic": det.biodynamic, "avoid": det.is_avoid}
+
+
+def survey(crop_name: str, after: str | None = None, horizon_days: int = 40) -> dict:
+    """All data for the LLM: both-agree recommendations + single-system alternatives + avoid days."""
+    crop = get_crop(crop_name)
+    after = after or date.today().isoformat()
+    days = almanac.survey_window(after, horizon_days)
+
+    recommended, panchangam_only, biodynamic_only, avoid = [], [], [], []
+    for d in days:
+        if d.is_avoid:
+            avoid.append(d.date)
+            continue
+        keezh_ok = d.nokku == crop.nokku
+        bio_ok = d.biodynamic == crop.biodynamic
+        if keezh_ok and bio_ok:
+            recommended.append(_brief(d))
+        elif keezh_ok:
+            panchangam_only.append(_brief(d))
+        elif bio_ok:
+            biodynamic_only.append(_brief(d))
+
+    return {
+        "crop": crop.name,
+        "needs": {"nokku": crop.nokku, "biodynamic": crop.biodynamic},
+        "window": {"from": after, "days": horizon_days,
+                   "covered": [days[0].date, days[-1].date] if days else []},
+        "spacing": {"row_gap_m": crop.row_gap_m, "seed_gap_m": crop.seed_gap_m,
+                    "seeds_per_spot": crop.seeds_per_spot},
+        "sow_season_months": crop.sow_months,
+        "recommended_both_systems": recommended,   # panchangam AND biodynamic agree, not avoid
+        "panchangam_only": panchangam_only,         # Keezh Nokku, not avoid, but not a biodynamic root day
+        "biodynamic_only": biodynamic_only,         # biodynamic root, not avoid, but not Keezh Nokku
+        "avoid_days_kari_naal": avoid,
+        "_note": "Prefer recommended_both_systems. Offer panchangam_only / biodynamic_only as "
+                 "alternatives if the farmer must sow sooner or favours one tradition.",
+    }
 
 
 @dataclass
@@ -30,67 +72,59 @@ class Recommendation:
     nakshatra_tamil: str | None
     nokku: str | None
     biodynamic: str | None
-    alternatives: list[str]
+    alternatives_both: list[str]
+    alternatives_panchangam_only: list[str]
+    alternatives_biodynamic_only: list[str]
+    avoid_days: list[str]
     row_gap_m: float
     seed_gap_m: float
     seeds_per_spot: int
     rationale: str
-    searched_from: str
-    searched_days: int
+    survey: dict
 
     def to_seed_plan(self, *, plot_w_m: float, plot_l_m: float, speed_mps: float = 0.10):
-        """Hand off to Act 2 — build a SeedPlan carrying the recommended date + rationale."""
         from ..config import SeedPlan
         return SeedPlan(
-            crop=self.crop,
-            plot_w_m=plot_w_m, plot_l_m=plot_l_m,
+            crop=self.crop, plot_w_m=plot_w_m, plot_l_m=plot_l_m,
             row_gap_m=self.row_gap_m, seed_gap_m=self.seed_gap_m,
             seeds_per_spot=self.seeds_per_spot, speed_mps=speed_mps,
-            recommended_date=self.recommended_date or "",
-            rationale=self.rationale,
+            recommended_date=self.recommended_date or "", rationale=self.rationale,
         )
 
 
 def recommend(crop_name: str, after: str | None = None, horizon_days: int = 40) -> Recommendation:
     crop = get_crop(crop_name)
     after = after or date.today().isoformat()
+    s = survey(crop_name, after, horizon_days)
 
-    dual = almanac.find_dual_favorable(crop.nokku, crop.biodynamic, after, horizon_days)
-    best = dual[0] if dual else None
-    alts = [d.date for d in dual[1:4]]
-
+    rec = s["recommended_both_systems"]
+    best = rec[0] if rec else None
     if best is not None:
-        in_season = int(best.date.split("-")[1]) in crop.sow_months
+        in_season = int(best["date"].split("-")[1]) in crop.sow_months
         rationale = (
             f"{crop.name.title()} is a {_NOKKU_LABEL[crop.nokku]} crop and a biodynamic "
-            f"{crop.biodynamic} crop. The earliest date favourable in BOTH systems on/after "
-            f"{after} is {best.date}: nakshatra {best.nakshatra} ({best.nakshatra_tamil}) → "
-            f"{crop.nokku.title()} Nokku, and a biodynamic {best.biodynamic} day, and it is "
-            f"not a கரி நாள் (avoid) day. "
-            + ("It also falls within the crop's sowing season. " if in_season
-               else "NOTE: this is outside the usual sowing months for this crop. ")
-            + (f"Other dual-favourable dates in the window: {', '.join(alts)}." if alts else "")
+            f"{crop.biodynamic} crop. Earliest date favourable in BOTH systems on/after "
+            f"{after} is {best['date']}: nakshatra {best['nakshatra']} ({best['nakshatra_tamil']}) "
+            f"→ {crop.nokku.title()} Nokku, and a biodynamic {best['biodynamic']} day, and not a "
+            f"கரி நாள் (avoid) day. "
+            + ("Within the sowing season. " if in_season else "NOTE: outside usual sowing months. ")
         )
     else:
-        rationale = (
-            f"No date on/after {after} within {horizon_days} days is favourable in both the "
-            f"panchangam ({crop.nokku} Nokku) and the biodynamic ({crop.biodynamic}) calendars "
-            f"while avoiding கரி நாள் days. Widen the window or re-pull the calendars."
-        )
+        rationale = (f"No both-systems date on/after {after} within {horizon_days} days. "
+                     f"See panchangam_only / biodynamic_only alternatives.")
 
     return Recommendation(
         crop=crop.name,
-        recommended_date=best.date if best else None,
+        recommended_date=best["date"] if best else None,
         both_agree=best is not None,
-        nakshatra=best.nakshatra if best else None,
-        nakshatra_tamil=best.nakshatra_tamil if best else None,
-        nokku=best.nokku if best else None,
-        biodynamic=best.biodynamic if best else None,
-        alternatives=alts,
-        row_gap_m=crop.row_gap_m,
-        seed_gap_m=crop.seed_gap_m,
-        seeds_per_spot=crop.seeds_per_spot,
-        rationale=rationale,
-        searched_from=after,
-        searched_days=horizon_days,
+        nakshatra=best["nakshatra"] if best else None,
+        nakshatra_tamil=best["nakshatra_tamil"] if best else None,
+        nokku=best["nokku"] if best else None,
+        biodynamic=best["biodynamic"] if best else None,
+        alternatives_both=[r["date"] for r in rec[1:4]],
+        alternatives_panchangam_only=[r["date"] for r in s["panchangam_only"][:4]],
+        alternatives_biodynamic_only=[r["date"] for r in s["biodynamic_only"][:4]],
+        avoid_days=s["avoid_days_kari_naal"],
+        row_gap_m=crop.row_gap_m, seed_gap_m=crop.seed_gap_m, seeds_per_spot=crop.seeds_per_spot,
+        rationale=rationale, survey=s,
     )

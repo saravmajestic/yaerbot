@@ -97,6 +97,17 @@ def find_dual_favorable(nokku_needed: str, biodynamic_needed: str,
     return out
 
 
+def survey_window(after: str, horizon_days: int = 40) -> list[DayDetail]:
+    """Every in-range day on/after `after` within the horizon, with both systems classified."""
+    start = date.fromisoformat(after)
+    out: list[DayDetail] = []
+    for i in range(horizon_days + 1):
+        det = day_detail((start + timedelta(days=i)).isoformat())
+        if det.in_range:
+            out.append(det)
+    return out
+
+
 def coverage() -> tuple[str, str]:
     """First and last date the panchangam cache covers."""
     ks = sorted(_NAK_BY_DATE)
