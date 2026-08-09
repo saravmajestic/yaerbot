@@ -65,48 +65,44 @@ class StubLLMClient:
 
 
 PRESENT_SYSTEM = (
-    "You are a sowing advisor for a Tamil Nadu farmer. You are GIVEN a compact analysis — do not "
-    "compute or invent anything, use only the values given. The UI already shows every date in a "
-    "table, so DO NOT list them all. Reply in 2-3 short, friendly sentences: name the recommended "
-    "date and why (both the panchangam Nokku Naal and the biodynamic day agree), mention that "
-    "earlier alternatives exist if they can't wait, and one short line on price/weather if given. "
-    "Never invent a date."
+    "You are a farm sowing advisor. Use ONLY the data; never invent dates or numbers. Reply in "
+    "2-3 short, friendly sentences: the recommended date (both the panchangam and biodynamic "
+    "calendar agree), that earlier alternatives exist if they can't wait, and one line on the "
+    "price level and weather."
 )
 
 
 def _compact(survey_data: dict, price: dict | None, weather: dict | None) -> dict:
-    """Shrink the full survey to just what the model needs — a big prompt is very slow on the
-    UNO Q CPU (a full-JSON prompt timed out at >3 min)."""
+    """LEAN summary for the model. Prompt-eval dominates on the UNO Q CPU (a 299-tok prompt took
+    ~90s just to read), so keep this tiny — the UI card shows the full detail."""
     rec = survey_data.get("recommended_both_systems") or []
     best = rec[0] if rec else None
-    needs = survey_data.get("needs", {})
     c = {
         "crop": survey_data.get("crop"),
         "recommended_date": best["date"] if best else None,
-        "why": (f"{best['nakshatra']} nakshatra ({needs.get('nokku')} Nokku) and a biodynamic "
-                f"{needs.get('biodynamic')} day, not a kari-naal avoid day") if best else "none in window",
-        "earlier_panchangam_only_count": len(survey_data.get("panchangam_only", [])),
-        "earlier_biodynamic_only_count": len(survey_data.get("biodynamic_only", [])),
+        "earlier_alternatives": (len(survey_data.get("panchangam_only", []))
+                                 + len(survey_data.get("biodynamic_only", []))),
     }
     if price:
-        c["price"] = f"{price['current']['price']} {price['unit']} ({price['recent_trend']}, YoY {price['yoy_change_pct']}%) [indicative]"
+        c["price"] = f"Rs{price['current']['price']}/quintal ({price['recent_trend']}, indicative)"
     if weather:
-        c["weather"] = f"near-term {weather['avg_tmax_c']}/{weather['avg_tmin_c']}C, {weather['total_rain_mm']}mm/{weather['rainy_days']} rainy days"
+        c["weather"] = f"{weather['avg_tmax_c']}/{weather['avg_tmin_c']}C, {weather['total_rain_mm']}mm near-term"
     return c
 
 
 def present(llm, question: str, survey_data: dict, price: dict | None = None,
             weather: dict | None = None, num_predict: int = 130) -> str:
-    """Data-in -> prose-out: a COMPACT summary to the model, capped output (CPU-friendly).
+    """Data-in -> prose-out: a LEAN summary to the model, capped output (CPU-friendly).
 
     All dates/numbers come from the passed-in data; the model only phrases them briefly (the UI
-    shows the full detail). This keeps small local models fast and grounded."""
-    user = (f"Farmer's question: {question}\n\nData (use only these):\n"
-            f"{json.dumps(_compact(survey_data, price, weather), ensure_ascii=False)}\n\n"
-            f"Answer in 2-3 short sentences.")
+    card shows the full detail). Keeps small local models fast and grounded — on the UNO Q this
+    roughly halved latency vs. a verbose prompt."""
+    user = (f"Data: {json.dumps(_compact(survey_data, price, weather), ensure_ascii=False)}\n"
+            f"Answer in 2-3 sentences.")
     msg = llm.chat([{"role": "system", "content": PRESENT_SYSTEM},
                     {"role": "user", "content": user}],
-                   [], options={"num_predict": num_predict, "temperature": 0.3})
+                   [], options={"num_predict": num_predict, "temperature": 0.3,
+                                "num_ctx": 1024, "num_thread": 4})
     return msg.get("content", "")
 
 
