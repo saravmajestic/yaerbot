@@ -1,0 +1,43 @@
+{
+  "_source": "Traditional Tamil agricultural almanac classification of the 27 nakshatras into Nokku Naal types. Keezh (downward) = root/tuber sowing (e.g. groundnut, kizhangu); Mel (upward) = climbers/above-ground; Sama (level) = neutral.",
+  "_keys": "drikpanchang Sanskrit nakshatra names (as pulled into panchangam_cache.json).",
+  "nokku_by_nakshatra": {
+    "Ashwini": "sama",
+    "Bharani": "keezh",
+    "Krittika": "keezh",
+    "Rohini": "mel",
+    "Mrigashira": "sama",
+    "Ardra": "mel",
+    "Punarvasu": "sama",
+    "Pushya": "mel",
+    "Ashlesha": "keezh",
+    "Magha": "keezh",
+    "Purva Phalguni": "keezh",
+    "Uttara Phalguni": "mel",
+    "Hasta": "sama",
+    "Chitra": "sama",
+    "Swati": "sama",
+    "Vishakha": "keezh",
+    "Anuradha": "sama",
+    "Jyeshtha": "sama",
+    "Mula": "keezh",
+    "Purva Ashadha": "keezh",
+    "Uttara Ashadha": "mel",
+    "Shravana": "mel",
+    "Dhanishtha": "mel",
+    "Shatabhisha": "mel",
+    "Purva Bhadrapada": "keezh",
+    "Uttara Bhadrapada": "mel",
+    "Revati": "sama"
+  },
+  "tamil_names": {
+    "Ashwini": "Aswathi", "Bharani": "Bharani", "Krittika": "Karthigai", "Rohini": "Rohini",
+    "Mrigashira": "Mirugasirisham", "Ardra": "Thiruvathirai", "Punarvasu": "Punarpoosam",
+    "Pushya": "Poosam", "Ashlesha": "Aayilyam", "Magha": "Magam", "Purva Phalguni": "Pooram",
+    "Uttara Phalguni": "Uthiram", "Hasta": "Hastham", "Chitra": "Chithirai", "Swati": "Swathi",
+    "Vishakha": "Vishagam", "Anuradha": "Anusham", "Jyeshtha": "Kettai", "Mula": "Moolam",
+    "Purva Ashadha": "Pooraadam", "Uttara Ashadha": "Uthiraadam", "Shravana": "Thiruvonam",
+    "Dhanishtha": "Avittam", "Shatabhisha": "Sadayam", "Purva Bhadrapada": "Pooratathi",
+    "Uttara Bhadrapada": "Uthirattadhi", "Revati": "Revathi"
+  }
+}

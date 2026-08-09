@@ -1,0 +1,20 @@
+{
+  "_source": "Biodynamic Association of India — 'உயிர் சக்தி வேளாண்மை நடவு நாட்காட்டி 2026' (Biodynamic Sowing Calendar 2026), https://biodynamics.in/wp-content/uploads/2025/12/Tamil.pdf (astronomical data by Dario Anderle). Extracted verbatim via pdftotext.",
+  "_scheme": "Maria-Thun-style: each day is a root / leaf / flower / fruit(seed) day per the Moon's constellation. 'avoid' = கரி நாள் (nodes/eclipse days). Days-of-month per 2026.",
+  "_crop_mapping": "root crops/tubers -> root; leafy -> leaf; flowering -> flower; fruit/seed/grain -> fruit.",
+  "year": 2026,
+  "months": {
+    "1":  {"fruit": [6,7,8,16,17,18,25,26], "root": [1,9,10,19,20,27,28,29], "flower": [2,3,11,12,13,21,22,30,31], "leaf": [4,5,14,15,23,24], "avoid": [8,22], "new_moon": [19], "full_moon": [3]},
+    "2":  {"fruit": [3,4,12,13,14,21,22], "root": [5,6,15,16,23,24,25], "flower": [7,8,9,17,18,26,27], "leaf": [1,2,10,11,19,20,21,28], "avoid": [4,18], "new_moon": [17], "full_moon": [2]},
+    "3":  {"fruit": [2,3,12,13,21,22,29,30,31], "root": [4,5,6,14,15,16,23,24], "flower": [7,8,17,18,25,26], "leaf": [1,9,10,11,19,20,27,28], "avoid": [3,17,30], "new_moon": [19], "full_moon": [3]},
+    "4":  {"fruit": [8,9,10,17,18,26,27], "root": [1,2,11,12,19,20,28,29], "flower": [3,4,5,13,14,21,22,29,30], "leaf": [6,7,15,16,23,24,25], "avoid": [14,27], "new_moon": [17], "full_moon": [2]},
+    "5":  {"fruit": [5,6,7,15,16,23,24], "root": [8,9,17,18,25,26,27], "flower": [1,2,10,11,12,19,20,28,29], "leaf": [3,4,13,14,21,22,30,31], "avoid": [11,23], "new_moon": [17], "full_moon": [1,31]},
+    "6":  {"fruit": [2,3,11,12,19,20,29,30], "root": [4,5,6,13,14,21,22,23], "flower": [7,8,15,16,24,25], "leaf": [1,9,10,17,18,26,27,28], "avoid": [7,19], "new_moon": [15], "full_moon": [30]},
+    "7":  {"fruit": [8,9,10,13,14,17,18,26,27,28], "root": [1,2,3,11,12,19,20,29,30], "flower": [4,5,13,14,21,22,23,31], "leaf": [6,7,15,16,24,25], "avoid": [4,17,31], "new_moon": [14,29], "full_moon": [29]},
+    "8":  {"fruit": [5,6,13,14,22,23,24], "root": [7,8,15,16,25,26], "flower": [1,9,10,17,18,19,27,28,29], "leaf": [2,3,4,11,12,20,21,30,31], "avoid": [13,28], "new_moon": [12], "full_moon": [28]},
+    "9":  {"fruit": [1,2,9,10,11,19,20,28,29], "root": [3,4,12,13,21,22,23,30], "flower": [5,6,14,15,24,25], "leaf": [7,8,15,16,17,18,26,27], "avoid": [10,24], "new_moon": [11], "full_moon": [26]},
+    "10": {"fruit": [7,8,16,17,18,26,27], "root": [1,9,10,19,20,28,29], "flower": [2,3,4,11,12,13,21,22,30,31], "leaf": [5,6,14,15,23,24,25], "avoid": [7,21], "new_moon": [10], "full_moon": [26]},
+    "11": {"fruit": [3,4,12,13,14,22,23,30], "root": [5,6,7,15,16,24,25], "flower": [8,9,17,18,19,26,27], "leaf": [1,2,10,11,20,21,28,29], "avoid": [3,17,30], "new_moon": [9], "full_moon": [24]},
+    "12": {"fruit": [1,10,11,19,20,21,28,29], "root": [2,3,4,12,13,14,22,23,30,31], "flower": [5,6,15,16,24,25], "leaf": [7,8,9,17,18,26,27], "avoid": [14,27], "new_moon": [9], "full_moon": [24]}
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "groundnut": {
+    "nokku": "keezh",
+    "biodynamic": "root",
+    "row_gap_m": 0.30,
+    "seed_gap_m": 0.15,
+    "seeds_per_spot": 1,
+    "sow_months": [6, 7, 8, 9],
+    "soil_temp_c": [25, 30],
+    "commodity": "Groundnut",
+    "note": "Legume grown for underground pods — Keezh Nokku (downward) in the panchangam, root day in the biodynamic calendar."
+  },
+  "spinach": {
+    "nokku": "mel",
+    "biodynamic": "leaf",
+    "row_gap_m": 0.20,
+    "seed_gap_m": 0.08,
+    "seeds_per_spot": 2,
+    "sow_months": [6, 7, 8, 9, 10, 11],
+    "soil_temp_c": [15, 25],
+    "commodity": "Spinach",
+    "note": "Leafy above-ground crop — Mel Nokku (upward), leaf day."
+  },
+  "tomato": {
+    "nokku": "mel",
+    "biodynamic": "fruit",
+    "row_gap_m": 0.60,
+    "seed_gap_m": 0.45,
+    "seeds_per_spot": 1,
+    "sow_months": [6, 7, 8, 9, 12, 1],
+    "soil_temp_c": [20, 28],
+    "commodity": "Tomato",
+    "note": "Above-ground fruiting crop — Mel Nokku, fruit day."
+  },
+  "sunflower": {
+    "nokku": "mel",
+    "biodynamic": "flower",
+    "row_gap_m": 0.45,
+    "seed_gap_m": 0.30,
+    "seeds_per_spot": 1,
+    "sow_months": [1, 2, 6, 7],
+    "soil_temp_c": [20, 28],
+    "commodity": "Sunflower",
+    "note": "Flowering crop — Mel Nokku, flower day."
+  }
+}
