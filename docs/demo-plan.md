@@ -77,7 +77,8 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [✅] **Data pipeline (calendars)**: Tamil panchangam (nakshatra→Nokku Naal) + biodynamic root/leaf/flower/fruit — real data cached to JSON (`farmos/planner/data/`)
 - [✅] **Reconciliation**: `planner.survey()` returns the full picture (both-systems recommendation + panchangam-only / biodynamic-only alternatives + kari-naal avoid days); `recommend()` picks the dual-validated date. groundnut→2026-09-03. Tested.
 - [✅] **LLM presentation** (`llm.present()`, data-in→prose-out): the LLM presents the computed data + alternatives; dates come from the reconciliation, not the model. **Gemma 2B > Qwen 1.5B** at faithful presentation (Qwen fudged alternatives; agentic tool-calling at ≤2B is unreliable — kept `converse()` but not the demo path).
-- [⬜] **Prices + weather**: pull Agmarknet + IMD and cache (deferred — not fabricated)
+- [🟡] **Prices**: MOCK 3-yr monthly history (groundnut/corn/sesame, `prices_mock.json`) wired into the presentation; real Agmarknet (data.gov.in) path stubbed for a one-line swap
+- [✅] **Weather**: REAL — live Open-Meteo (no API key) with cache-fallback; near-term outlook + honest horizon flag (climatological normals for a date >16 days out = follow-up). Farm = Salem, TN
 - [⬜] **Chat tab** in the operator console (later: voice)
 - [⬜] On the UNO Q: install Ollama, copy the Gemma/Qwen blobs, measure `free -m` + tok/s, lock the tag
 
