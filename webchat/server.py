@@ -64,9 +64,17 @@ class Handler(BaseHTTPRequestHandler):
         payload = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        self.send_header("Access-Control-Allow-Origin", "*")   # console tab (:7000) calls this (:8765)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def do_OPTIONS(self):                                       # CORS preflight for POST + JSON
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length", 0))
@@ -120,6 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers={"Content-Type": "application/json"})
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")   # stream also needs CORS
             self.end_headers()
             with urllib.request.urlopen(req, timeout=300) as resp:
                 for line in resp:                    # Ollama streams NDJSON, one obj per line

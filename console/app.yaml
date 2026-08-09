@@ -1,0 +1,6 @@
+name: Farm Robot Control
+icon: 🤖
+description: Motor control web UI for the farm robot.
+
+bricks:
+  - arduino:web_ui

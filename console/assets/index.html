@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Farm Robot — Operator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ── Status bar (always visible) ────────────────────────────── -->
+  <header class="status-bar">
+    <span class="conn"><span class="status-dot" id="dot"></span><span id="status-text">Connecting…</span></span>
+
+    <div class="chips" id="chips">
+      <span class="chip" id="chip-batt" title="Battery">🔋 <b id="st-batt">—</b></span>
+      <span class="chip" title="Memory">🧠 <b id="st-ram">—</b></span>
+      <span class="chip" title="CPU">⚡ <b id="st-cpu">—</b></span>
+      <span class="chip" title="Network">📶 <b id="st-net">—</b></span>
+      <span class="chip" title="Uptime">⏱ <b id="st-up">—</b></span>
+    </div>
+
+    <button class="estop" id="btn-estop" title="Emergency stop">■ STOP</button>
+  </header>
+
+  <!-- ── Panels ─────────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- DRIVE -->
+    <section class="panel active" id="panel-drive">
+      <div class="drive-wrap">
+        <img id="drive-cam" class="drive-cam" alt="camera">
+        <div class="dpad">
+          <div class="dpad-row">
+            <button class="btn-dir" data-dir="forward">&#9650;</button>
+          </div>
+          <div class="dpad-row dpad-middle">
+            <button class="btn-dir" data-dir="left">&#9664;</button>
+            <button class="btn-stop" id="btn-stop">&#9632;</button>
+            <button class="btn-dir" data-dir="right">&#9654;</button>
+          </div>
+          <div class="dpad-row">
+            <button class="btn-dir" data-dir="backward">&#9660;</button>
+          </div>
+        </div>
+
+        <div class="speed-section">
+          <label>Speed <span id="speed-val">70</span>%</label>
+          <input type="range" id="speed-slider" min="1" max="100" value="70">
+        </div>
+      </div>
+    </section>
+
+    <!-- SEED -->
+    <section class="panel" id="panel-seed">
+      <div class="seed-wrap">
+
+        <div class="card">
+          <h2>Mode</h2>
+          <div class="seg" id="seg-trigger">
+            <button class="seg-btn active" data-v="space">Space-based</button>
+            <button class="seg-btn" data-v="drip" disabled>Drip-based · soon</button>
+          </div>
+          <div class="seg" id="seg-arm">
+            <button class="seg-btn active" data-v="fixed">Fixed arm · 2 rows</button>
+            <button class="seg-btn" data-v="rotating" disabled>Rotating · soon</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Parameters</h2>
+          <div class="field">
+            <label>Gap between plants <span id="seed-gap-val">2.0</span> s</label>
+            <input type="range" id="seed-gap" min="0.5" max="8" step="0.5" value="2">
+            <p class="hint">Timed drive — actual spacing ≈ gap × speed (calibrate on flat ground).</p>
+          </div>
+          <div class="field">
+            <label>Seeds per spot <span id="seed-spot-val">1</span></label>
+            <input type="range" id="seed-spot" min="1" max="5" step="1" value="1">
+          </div>
+          <div class="field">
+            <label>Drive speed <span id="seed-speed-val">60</span>%</label>
+            <input type="range" id="seed-speed" min="20" max="100" step="5" value="60">
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="seed-status" id="seed-status">Idle</div>
+          <div class="row seed-run">
+            <button class="btn-wide start"  id="seed-start">▶ Start</button>
+            <button class="btn-wide pause"  id="seed-pause">⏸ Pause</button>
+            <button class="btn-wide sstop"  id="seed-stop">■ Stop</button>
+          </div>
+          <button class="btn-wide plant1" id="seed-plant1">🌱 Plant once (test)</button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- SOIL -->
+    <section class="panel" id="panel-soil">
+      <div class="soil-wrap">
+
+        <div class="card">
+          <h2>Live readings</h2>
+          <div class="readouts">
+            <div class="ro"><span class="ro-label">Moisture 1</span><span class="ro-val" id="so-m0">—</span></div>
+            <div class="ro"><span class="ro-label">Moisture 2</span><span class="ro-val" id="so-m1">—</span></div>
+            <div class="ro"><span class="ro-label">Temperature</span><span class="ro-val" id="so-temp">—</span></div>
+            <div class="ro"><span class="ro-label">EC (raw)</span><span class="ro-val" id="so-ec">—</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <button class="btn-wide sample" id="soil-sample">🧪 Sample here</button>
+          <p class="hint" id="soil-logged">0 samples logged</p>
+          <p class="hint">GPS position is not tagged yet (BN-880 RPC pending).</p>
+        </div>
+
+        <div class="card">
+          <h2>Survey mode</h2>
+          <div class="field">
+            <label>Auto-sample every <span id="survey-int-val">5</span> s</label>
+            <input type="range" id="survey-int" min="2" max="30" step="1" value="5">
+          </div>
+          <div class="row">
+            <button class="btn-wide start" id="survey-start">▶ Start survey</button>
+            <button class="btn-wide sstop" id="survey-stop">■ Stop</button>
+          </div>
+          <p class="hint" id="survey-state">Not surveying — drive the robot and it logs a reading each interval.</p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- CAMERA (Stage 5 — drip vision) -->
+    <section class="panel" id="panel-camera">
+      <div class="cam-wrap">
+
+        <div class="card">
+          <h2>Camera</h2>
+          <div class="row">
+            <input type="text" id="cam-url" class="cam-input" value="10.100.166.144" placeholder="cam IP or farmcam.local">
+            <button class="btn-wide net" id="cam-set">Connect</button>
+          </div>
+        </div>
+
+        <div class="cam-view" id="cam-view">
+          <img id="cam-feed" alt="camera feed">
+          <div class="cam-hint" id="cam-hint">Connect to the camera (farmcam.local) to see the annotated feed.</div>
+        </div>
+
+        <div class="card">
+          <div class="seed-status" id="cam-status">Vision: —</div>
+          <div class="row">
+            <button class="btn-wide start" id="drip-start">▶ Follow drip line</button>
+            <button class="btn-wide sstop" id="drip-stop">■ Stop</button>
+          </div>
+          <p class="hint">Robot follows the drip tube via on-device CV and plants at each detected emitter.</p>
+        </div>
+
+        <div class="card">
+          <h2>Dataset capture <span id="cap-count" class="cap-count">0</span>
+            <button class="cap-clear" id="cap-clear">Clear</button></h2>
+          <div class="field">
+            <label>Interval: <span id="cap-int-val">2</span>s</label>
+            <input type="range" id="cap-int" min="0.5" max="10" step="0.5" value="2">
+          </div>
+          <div class="row">
+            <button class="btn-wide start" id="cap-start">● Start capture</button>
+            <button class="btn-wide sstop"  id="cap-stop">■ Stop</button>
+          </div>
+          <div class="cap-status" id="cap-status">Connect the camera, then Start — drive the drip line to collect images.</div>
+          <div class="cap-strip" id="cap-strip"></div>
+          <p class="hint">Saves raw frames on the robot for training the emitter model. Newest thumbnails shown first; verify the tube/emitters are in frame.</p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- PLAN (Act 1 — sowing advisor: on-device LLM over panchangam + biodynamic) -->
+    <section class="panel" id="panel-plan">
+      <div class="plan-wrap">
+        <div class="plan-chat" id="plan-chat"></div>
+        <div class="plan-composer">
+          <div class="plan-quick" id="plan-quick"></div>
+          <div class="plan-inp">
+            <input id="plan-text" placeholder="Which crop to plant? (e.g. groundnut)" autocomplete="off">
+            <button id="plan-send">Send</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section class="panel" id="panel-settings">
+      <div class="card">
+        <h2>Network</h2>
+        <div class="row">
+          <button class="btn-wide net-status" id="net-status" disabled></button>
+          <button class="btn-wide net" id="net-action"></button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Power</h2>
+        <div class="row">
+          <button class="btn-wide reboot" id="btn-reboot">&#10227; Reboot</button>
+          <button class="btn-wide shutdown" id="btn-shutdown">&#9211; Shutdown</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── Tab bar ────────────────────────────────────────────────── -->
+  <nav class="tabs">
+    <button class="tab active" data-tab="drive">🕹 Drive</button>
+    <button class="tab" data-tab="seed">🌱 Seed</button>
+    <button class="tab" data-tab="soil">🧪 Soil</button>
+    <button class="tab" data-tab="camera">📷 Cam</button>
+    <button class="tab" data-tab="plan">🌾 Plan</button>
+    <button class="tab" data-tab="settings">⚙ Settings</button>
+  </nav>
+
+  <script src="libs/socket.io.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
