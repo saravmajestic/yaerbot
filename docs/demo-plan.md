@@ -80,7 +80,7 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [🟡] **Prices**: MOCK 3-yr monthly history (groundnut/corn/sesame, `prices_mock.json`) wired into the presentation; real Agmarknet (data.gov.in) path stubbed for a one-line swap
 - [✅] **Weather**: REAL — live Open-Meteo (no API key) with cache-fallback; near-term outlook + honest horizon flag (climatological normals for a date >16 days out = follow-up). Farm = Salem, TN
 - [🟡] **Chat/Plan tab**: standalone prototype built (`webchat/` — chat UI + server calling the planner + Gemma, dark console theme); integrate into the operator console as a tab next (later: voice)
-- [⬜] On the UNO Q: install Ollama, copy the Gemma/Qwen blobs, measure `free -m` + tok/s, lock the tag
+- [✅] **On the UNO Q**: Ollama + Gemma/Qwen installed under `/home` (root untouched, 12 GB free); chat e2e works on-device. **Speed: Gemma ~1.9 tok/s, Qwen ~2.7 tok/s → a full answer ~1–2 min on this CPU** (RAM fine, ~1 GB free with model resident). For the demo: show the instant deterministic card, pre-warm the model, stream a short prose summary — the LLM is a 'reasoning step,' not snappy chat.
 
 ### B2 — Path planning + spacing (Act 2)
 - [🟡] **Timed space-based seeding mode** exists in the Seed panel (gap × speed, single-spot) — *superseded by the path executor below*
