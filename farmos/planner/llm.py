@@ -65,10 +65,12 @@ class StubLLMClient:
 
 
 PRESENT_SYSTEM = (
-    "You are a farm sowing advisor. Use ONLY the data; never invent dates or numbers. Reply in "
-    "2-3 short, friendly sentences: the recommended date (both the panchangam and biodynamic "
-    "calendar agree), that earlier alternatives exist if they can't wait, and one line on the "
-    "price level and weather."
+    "You are a farm sowing advisor. Use ONLY the data; never invent dates or numbers. "
+    "If recommended_date is given, reply in 2-3 short sentences: that date (both the panchangam "
+    "and biodynamic calendar agree), that earlier alternatives exist if they can't wait, and one "
+    "line on price/weather. If recommended_date is null, say plainly that NO date in this window "
+    "satisfies BOTH calendars, and suggest they pick from the earlier single-system alternatives "
+    "(the app lists them) — do NOT claim a recommended date."
 )
 
 
@@ -80,8 +82,9 @@ def _compact(survey_data: dict, price: dict | None, weather: dict | None) -> dic
     c = {
         "crop": survey_data.get("crop"),
         "recommended_date": best["date"] if best else None,
-        "earlier_alternatives": (len(survey_data.get("panchangam_only", []))
-                                 + len(survey_data.get("biodynamic_only", []))),
+        "both_calendars_agree": bool(best),
+        "earlier_single_system_alternatives": (len(survey_data.get("panchangam_only", []))
+                                               + len(survey_data.get("biodynamic_only", []))),
     }
     if price:
         c["price"] = f"Rs{price['current']['price']}/quintal ({price['recent_trend']}, indicative)"
@@ -90,19 +93,22 @@ def _compact(survey_data: dict, price: dict | None, weather: dict | None) -> dic
     return c
 
 
+def present_messages(survey_data: dict, price: dict | None = None, weather: dict | None = None) -> list[dict]:
+    """The lean [system, user] messages for the presentation — shared by present() (blocking)
+    and the streaming narrate endpoint."""
+    return [{"role": "system", "content": PRESENT_SYSTEM},
+            {"role": "user", "content": f"Data: {json.dumps(_compact(survey_data, price, weather), ensure_ascii=False)}\nAnswer in 2-3 sentences."}]
+
+
+PRESENT_OPTIONS = {"temperature": 0.3, "num_ctx": 1024, "num_thread": 4}
+
+
 def present(llm, question: str, survey_data: dict, price: dict | None = None,
             weather: dict | None = None, num_predict: int = 130) -> str:
-    """Data-in -> prose-out: a LEAN summary to the model, capped output (CPU-friendly).
-
-    All dates/numbers come from the passed-in data; the model only phrases them briefly (the UI
-    card shows the full detail). Keeps small local models fast and grounded — on the UNO Q this
-    roughly halved latency vs. a verbose prompt."""
-    user = (f"Data: {json.dumps(_compact(survey_data, price, weather), ensure_ascii=False)}\n"
-            f"Answer in 2-3 sentences.")
-    msg = llm.chat([{"role": "system", "content": PRESENT_SYSTEM},
-                    {"role": "user", "content": user}],
-                   [], options={"num_predict": num_predict, "temperature": 0.3,
-                                "num_ctx": 1024, "num_thread": 4})
+    """Data-in -> prose-out (blocking). The streaming path (webchat /api/narrate) uses
+    present_messages() + PRESENT_OPTIONS directly against Ollama's stream API."""
+    msg = llm.chat(present_messages(survey_data, price, weather),
+                   [], options={**PRESENT_OPTIONS, "num_predict": num_predict})
     return msg.get("content", "")
 
 
