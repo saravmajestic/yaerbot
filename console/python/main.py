@@ -308,7 +308,19 @@ def on_survey_stop(client, data):
 # frames to the browser over the socket at a throttled rate. The browser never
 # touches the cam directly.
 _cam = {"url": "", "w": 0, "h": 0, "tube": None, "emitter": None, "watch": 0.0}
-_drip = {"state": "idle"}          # idle | following
+# Drip seeding (Act 3). The trigger is the CAMERA, not odometry: plant at each
+# emitter the model finds. `emitter_gap` is the operator's APPROXIMATE spacing —
+# it isn't used to place seeds, only to (a) reject a second detection of the same
+# emitter and (b) estimate counts/time for the UI.
+# The seeder arm carries 2 outlets 180° apart and one solenoid fires both, so a
+# single plantSeed drops 2 seeds. `angle` rotates that pair: 0° lays them along
+# the drip line, 90° across it. The opposite outlet always lands at angle+180.
+_drip = {
+    "state": "idle",               # idle | following
+    "emitter_gap": 0.40, "rotate": False, "angle": 0, "dry": True,
+    "planted": 0, "msg": "",
+}
+_ARM_DWELL_S = 0.6                 # let the spool servo reach the angle before dropping
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
 _WATCH_TTL   = 2.0                 # keep pushing this long after the last get_vision poll
@@ -322,6 +334,10 @@ _capture = {"on": False, "interval": 2.0, "count": 0, "last": 0.0}
 
 # drip-follow tunables (mirror vision/tube_follow.py)
 _BASE_PWM, _STEER_GAIN, _EMIT_CONF, _EMIT_COOLDOWN = 77, 10, 0.55, 3.0
+# Tube-following creeps at _BASE_PWM, well below the PWM the drive was calibrated
+# at, so scale the measured cruise speed by the duty ratio for the distance guard.
+# Rough on purpose: it only has to tell 'same emitter' from 'the next one'.
+_DRIP_SPEED_MPS = CAL["speed"] * (_BASE_PWM / CAL["pwm"])
 
 def _moisture_min():
     try:
@@ -385,6 +401,8 @@ def _stream_url(base):
 
 def _cam_loop(url):
     last_plant = 0.0
+    dist_since_plant = 1e9      # start "far" so the first emitter is never rejected
+    driving_since = None        # when the current drive segment began
     last_push = 0.0
     push_interval = 1.0 / _BROWSER_FPS
     try:
@@ -418,18 +436,36 @@ def _cam_loop(url):
             _capture["last"] = now
 
         if _drip["state"] == "following":
+            # Reject a re-detection of the SAME emitter by distance, not just time:
+            # a time cooldown is speed-dependent, so it either double-plants when
+            # slow or skips emitters when fast. Distance is estimated from the
+            # calibrated cruise speed while actually driving (no encoders).
+            min_gap = 0.6 * _drip["emitter_gap"]
             if emit["detected"] and emit["confidence"] >= _EMIT_CONF \
-                    and (time.time() - last_plant) > _EMIT_COOLDOWN:
-                Bridge.call("stop")
-                Bridge.call("plantSeed")
+                    and dist_since_plant >= min_gap:
+                _drive_stop("drip")
+                if _drip["rotate"]:
+                    Bridge.call("indexSpool", int(_drip["angle"]))
+                    time.sleep(_ARM_DWELL_S)          # servo needs to arrive first
+                if not _drip["dry"]:
+                    Bridge.call("plantSeed")          # both outlets: 2 seeds, angle apart
+                _drip["planted"] += 1
                 last_plant = time.time()
+                dist_since_plant = 0.0
+                ui.send_message("drip", _drip_state())
             elif tube["found"]:
                 c = tube["correction"]
                 l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
                                int(_BASE_PWM - _STEER_GAIN * c))
-                Bridge.call("setMotors", max(0, min(255, l)), max(0, min(255, r)))
+                _drive(max(0, min(255, l)), max(0, min(255, r)), "drip", "forward")
+                if driving_since:                     # integrate travel while moving
+                    dist_since_plant += (now - driving_since) * _DRIP_SPEED_MPS
+                driving_since = now
             else:
-                Bridge.call("stop")
+                _drive_stop("drip")                   # lost the tube — don't drive blind
+                driving_since = None
+        else:
+            driving_since = None
 
         # Push an annotated frame to the browser — only while the Camera tab is
         # open (recent get_vision poll) and rate-limited, so the cam still gets
@@ -470,13 +506,59 @@ def on_get_vision(client, data):
         "drip": _drip["state"],
     })
 
+def _drip_state():
+    """Drip status + readiness. The camera IS the trigger, so surface its state."""
+    emit = _cam.get("emitter") or {}
+    tube = _cam.get("tube") or {}
+    gap = max(0.05, _drip["emitter_gap"])
+    return {
+        **{k: _drip[k] for k in
+           ("state", "emitter_gap", "rotate", "angle", "dry", "planted", "msg")},
+        "cam_connected": bool(_cam["url"]),
+        "detector": ("ML/Edge-Impulse" if (_VISION_OK and ml_available())
+                     else "classical CV" if _VISION_OK else "unavailable"),
+        "tube_found": bool(tube.get("found")),
+        "emitter_conf": emit.get("confidence"),
+        # rough expectation over the marked plot: one lateral's worth of emitters
+        "expected": int(_plot["l"] / gap) + 1,
+    }
+
+
+def on_drip_config(client, data):
+    if "emitter_gap" in data:
+        _drip["emitter_gap"] = max(0.05, float(data["emitter_gap"]))
+    if "rotate" in data:
+        _drip["rotate"] = bool(data["rotate"])
+    if "angle" in data:
+        _drip["angle"] = int(data["angle"]) % 180      # angle+180 is the other outlet
+    if "dry" in data:
+        _drip["dry"] = bool(data["dry"])
+    ui.send_message("drip", _drip_state())
+
+
+def on_get_drip(client, data):
+    ui.send_message("drip", _drip_state())
+
+
 def on_drip_start(client, data):
-    if _VISION_OK and _cam["url"]:
-        _drip["state"] = "following"
+    on_drip_config(client, data)               # accept config sent with Start
+    if not (_VISION_OK and _cam["url"]):
+        _drip["msg"] = "connect the camera first — the emitter model is the trigger"
+    elif len(_plot["corners"]) < 4:
+        _drip["msg"] = "mark all 4 corners first"
+    else:
+        _drip.update(state="following", planted=0, msg="")
+        log("drip run: gap~%.2fm, %s, %s" % (
+            _drip["emitter_gap"],
+            "arm @ %d/%d deg" % (_drip["angle"], _drip["angle"] + 180)
+            if _drip["rotate"] else "arm flat (0/180 deg)",
+            "DRY (no seeder)" if _drip["dry"] else "seeder ARMED"))
+    ui.send_message("drip", _drip_state())
 
 def on_drip_stop(client, data):
     _drip["state"] = "idle"
-    Bridge.call("stop")
+    _drive_stop("drip")
+    ui.send_message("drip", _drip_state())
 
 # ── Dataset capture (drive the drip line, collect the emitter training set) ──
 def _save_capture(frame):
@@ -843,6 +925,7 @@ ui.on_message("soil_sample",   logged("soil_sample",   on_soil_sample))
 ui.on_message("survey_start",  logged("survey_start",  on_survey_start))
 ui.on_message("survey_stop",   logged("survey_stop",   on_survey_stop))
 ui.on_message("set_camera",    logged("set_camera",    on_set_camera))
+ui.on_message("drip_config",   logged("drip_config",   on_drip_config))
 ui.on_message("drip_start",    logged("drip_start",    on_drip_start))
 ui.on_message("drip_stop",     logged("drip_stop",     on_drip_stop))
 ui.on_message("capture_start", logged("capture_start", on_capture_start))
@@ -860,5 +943,6 @@ ui.on_message("plot_start",    logged("plot_start",  on_plot_start))
 ui.on_message("plot_pause",    logged("plot_pause",  on_plot_pause))
 ui.on_message("plot_stop",     logged("plot_stop",   on_plot_stop))
 ui.on_message("get_plot",      on_get_plot)
+ui.on_message("get_drip",      on_get_drip)
 
 App.run()

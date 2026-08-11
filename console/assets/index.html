@@ -59,10 +59,11 @@
           <h2>Land</h2>
           <div class="seg" id="seg-land">
             <button class="seg-btn active" data-v="plain">🟫 Plain land</button>
-            <button class="seg-btn" data-v="drip" disabled>💧 Drip-irrigated · soon</button>
+            <button class="seg-btn" data-v="drip">💧 Drip-irrigated</button>
           </div>
-          <p class="hint">Plain land seeds on a fixed grid. Drip land plants at each
-            emitter the camera finds — no spacing needed there.</p>
+          <p class="hint">Plain land seeds on a fixed grid from the plan below.
+            Drip land follows the lateral and plants at each <b>emitter the camera
+            finds</b> — the spacing there is only an estimate for counting.</p>
         </div>
 
         <div class="card">
@@ -89,7 +90,7 @@
           <button class="btn-wide" id="pt-clear">Clear marks</button>
         </div>
 
-        <div class="card">
+        <div class="card only-plain">
           <h2>Spacing</h2>
           <div class="row">
             <div class="field pt-dim">
@@ -107,7 +108,42 @@
           </div>
         </div>
 
-        <div class="card">
+        <!-- DRIP -->
+        <div class="card only-drip" hidden>
+          <h2>Emitters</h2>
+          <div class="field pt-dim">
+            <label>Approximate spacing between emitters (cm)</label>
+            <input type="number" id="dr-gap" min="10" max="200" step="5" value="40">
+            <p class="hint">Seeds are placed where the camera <b>sees</b> an emitter.
+              This figure only estimates the count and stops one emitter being
+              planted twice — it doesn't need to be exact.</p>
+          </div>
+        </div>
+
+        <div class="card only-drip" hidden>
+          <h2>Seed placement</h2>
+          <label class="pt-dry"><input type="checkbox" id="dr-rotate">
+            Rotate the arm (otherwise it stays flat along the line)</label>
+          <div class="dr-angles" id="dr-angles">
+            <button class="dr-ang active" data-a="0">0°</button>
+            <button class="dr-ang" data-a="45">45°</button>
+            <button class="dr-ang" data-a="90">90°</button>
+            <button class="dr-ang" data-a="135">135°</button>
+          </div>
+          <div class="dr-diagram">
+            <svg id="dr-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+          </div>
+          <p class="hint" id="dr-hint"></p>
+        </div>
+
+        <div class="card only-drip" hidden>
+          <h2>Camera</h2>
+          <div class="dr-ready" id="dr-ready">—</div>
+          <p class="hint">The emitter model is the trigger, so the camera must be
+            connected before a drip run. Set it up in the <b>Cam</b> tab.</p>
+        </div>
+
+        <div class="card only-plain">
           <h2>Plan</h2>
           <div class="pt-plot" id="pt-plot">
             <svg id="pt-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
@@ -115,7 +151,7 @@
           <div class="pt-stats" id="pt-stats">—</div>
         </div>
 
-        <div class="card">
+        <div class="card only-plain">
           <div class="seed-status" id="seed-status">Idle</div>
           <label class="pt-dry"><input type="checkbox" id="pt-dry" checked>
             Dry run — drive the path, don't fire the seeder</label>
@@ -124,6 +160,19 @@
             <button class="btn-wide pause"  id="pt-pause">⏸ Pause</button>
             <button class="btn-wide sstop"  id="pt-stop">■ Stop</button>
           </div>
+        </div>
+
+        <div class="card only-drip" hidden>
+          <div class="seed-status" id="dr-status">Idle</div>
+          <label class="pt-dry"><input type="checkbox" id="dr-dry" checked>
+            Dry run — follow the line and stop at emitters, don't fire the seeder</label>
+          <div class="row seed-run">
+            <button class="btn-wide start" id="dr-start">▶ Follow line</button>
+            <button class="btn-wide sstop" id="dr-stop">■ Stop</button>
+          </div>
+        </div>
+
+        <div class="card">
           <button class="btn-wide plant1" id="seed-plant1">🌱 Plant once (test)</button>
         </div>
 

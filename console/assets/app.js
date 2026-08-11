@@ -43,7 +43,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     setDriveCam(name === 'drive');        // start/stop the Drive-tab direct stream
     if (name === 'soil')   socket.emit('get_soil', {});    // prime readings immediately
     if (name === 'diag')   socket.emit('get_diag', {});
-    if (name === 'seed')   socket.emit('get_plot', {});
+    if (name === 'seed') { socket.emit('get_plot', {}); socket.emit('get_drip', {}); }
     if (name === 'camera') { socket.emit('get_vision', {}); socket.emit('get_capture', {}); }
   });
 });
@@ -311,6 +311,97 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
     document.getElementById('pt-report-svg').innerHTML = d.svg || '';
     box.hidden = !d.svg;
   });
+})();
+
+// ── Drip seeding (Act 3): follow the lateral, plant at each detected emitter ──
+(function initDrip() {
+  const svg = document.getElementById('dr-svg');
+  if (!svg) return;
+  const gapEl = document.getElementById('dr-gap');
+  const rotEl = document.getElementById('dr-rotate');
+  const dryEl = document.getElementById('dr-dry');
+  const hint  = document.getElementById('dr-hint');
+  let angle = 0;
+
+  const sendCfg = () => socket.emit('drip_config', {
+    emitter_gap: +gapEl.value / 100, rotate: rotEl.checked,
+    angle, dry: dryEl.checked,
+  });
+
+  // Land selector shows one flow or the other — they take different inputs.
+  document.querySelectorAll('#seg-land .seg-btn').forEach(b =>
+    b.addEventListener('click', () => {
+      if (b.disabled) return;
+      const land = b.dataset.v;
+      document.querySelectorAll('#seg-land .seg-btn').forEach(x =>
+        x.classList.toggle('active', x === b));
+      document.querySelectorAll('.only-plain').forEach(el => el.hidden = land !== 'plain');
+      document.querySelectorAll('.only-drip').forEach(el => el.hidden = land !== 'drip');
+      socket.emit('plot_config', { land });
+      if (land === 'drip') socket.emit('get_drip', {});
+    }));
+
+  document.querySelectorAll('#dr-angles .dr-ang').forEach(b =>
+    b.addEventListener('click', () => {
+      angle = +b.dataset.a;
+      document.querySelectorAll('#dr-angles .dr-ang').forEach(x =>
+        x.classList.toggle('active', x === b));
+      // choosing an angle implies you want rotation
+      if (angle !== 0) rotEl.checked = true;
+      drawArm(); sendCfg();
+    }));
+  [gapEl, rotEl, dryEl].forEach(el => el.addEventListener('change', () => { drawArm(); sendCfg(); }));
+
+  function drawArm() {
+    const rot = rotEl.checked, a = rot ? angle : 0;
+    // Two outlets 180 deg apart on one arm: choosing `a` also places one at a+180.
+    const rad = a * Math.PI / 180, R = 26;
+    const cx = 50, cy = 50;
+    const p1 = [cx + R * Math.cos(rad), cy - R * Math.sin(rad)];
+    const p2 = [cx - R * Math.cos(rad), cy + R * Math.sin(rad)];
+    svg.innerHTML = `
+      <line x1="4" y1="${cy}" x2="96" y2="${cy}" class="dr-line"/>
+      <text x="6" y="${cy - 4}" class="dr-lbl">drip line</text>
+      <line x1="${p1[0].toFixed(1)}" y1="${p1[1].toFixed(1)}"
+            x2="${p2[0].toFixed(1)}" y2="${p2[1].toFixed(1)}" class="dr-arm"/>
+      <circle cx="${cx}" cy="${cy}" r="4.5" class="dr-emit"/>
+      <text x="${cx}" y="${cy + 1.6}" class="dr-elbl">E</text>
+      <circle cx="${p1[0].toFixed(1)}" cy="${p1[1].toFixed(1)}" r="4" class="dr-seed"/>
+      <circle cx="${p2[0].toFixed(1)}" cy="${p2[1].toFixed(1)}" r="4" class="dr-seed"/>
+      <text x="${p1[0].toFixed(1)}" y="${(p1[1] - 6).toFixed(1)}" class="dr-alab">${a}°</text>
+      <text x="${p2[0].toFixed(1)}" y="${(p2[1] + 9).toFixed(1)}" class="dr-alab">${a + 180}°</text>`;
+    hint.textContent = rot
+      ? `Arm rotated to ${a}° — the second outlet lands at ${a + 180}°. 2 seeds per emitter.`
+      : 'Arm flat: 2 seeds along the drip line (0° / 180°). 2 seeds per emitter.';
+  }
+
+  document.getElementById('dr-start').addEventListener('click', () => {
+    const dry = dryEl.checked;
+    if (!confirm(dry ? 'Follow the drip line?\n\nThe robot will drive along the tube and stop at each emitter. Keep the area clear.'
+                     : '⚠ SEEDER ARMED\n\nThe robot will follow the tube and plant at every emitter it detects. Continue?')) return;
+    socket.emit('drip_start', {
+      emitter_gap: +gapEl.value / 100, rotate: rotEl.checked, angle, dry,
+    });
+  });
+  document.getElementById('dr-stop').addEventListener('click', () => socket.emit('drip_stop', {}));
+
+  socket.on('drip', d => {
+    const st = document.getElementById('dr-status');
+    st.textContent = (d.state === 'following' ? 'Following the line' : 'Idle')
+      + ` — ${d.planted || 0}/${d.expected || '?'} emitters planted`
+      + (d.msg ? ' · ' + d.msg : '');
+    st.className = 'seed-status ' + (d.state === 'following' ? 'running' : '');
+
+    const ok = d.cam_connected && d.detector !== 'unavailable';
+    document.getElementById('dr-ready').innerHTML =
+      `<span class="${ok ? 'dr-ok' : 'dr-bad'}">${ok ? '● ready' : '● not ready'}</span>` +
+      ` · camera ${d.cam_connected ? 'connected' : 'NOT connected'}` +
+      ` · detector: ${d.detector}` +
+      ` · tube ${d.tube_found ? 'found' : 'not visible'}` +
+      (d.emitter_conf != null ? ` · emitter conf ${d.emitter_conf}` : '');
+  });
+
+  drawArm();
 })();
 
 // ── Diag: trace one command browser → console → MCU → pins → motor current ──
