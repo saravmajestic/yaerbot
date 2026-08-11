@@ -175,81 +175,16 @@ def on_start_hotspot(client, data):
     _helper_request("hotspot")   # force the FarmOS-AP hotspot
 
 
-# ── Seeder: space-based run (fixed arm) ─────────────────────────────────────
-# Timed dead-reckoning: drive at a set speed for `gap_ms` (≈ the spacing), stop,
-# plant, repeat. LIMITATION: distance = speed × time, so slopes / wheel-slip
-# drift the real spacing. Good enough on flat ground; encoders would fix it.
-# Drip-based + rotating-arm come later.
-_seed = {"state": "idle", "phase": "—", "planted": 0, "seeds": 0}
-_seed_cfg = {"gap_ms": 2000, "seeds_per_spot": 1, "drive_speed": 150}
-_seed_thread = None
-
-def _drive_gap():
-    """Drive forward for gap_ms; abort only on STOP (state->idle). Returns False if stopped."""
-    spd = _seed_cfg["drive_speed"]
-    l, r = trimmed(spd, spd)
-    _drive(l, r, "seed", "forward")
-    end = time.time() + _seed_cfg["gap_ms"] / 1000.0
-    while time.time() < end:
-        if _seed["state"] == "idle":
-            _drive_stop("seed")
-            return False
-        time.sleep(0.05)
-    _drive_stop("seed")
-    return True
-
-def _seed_loop():
-    try:
-        while _seed["state"] != "idle":
-            if _seed["state"] == "paused":      # pause takes effect between cycles
-                time.sleep(0.1)
-                continue
-            _seed["phase"] = "driving"
-            if not _drive_gap():
-                break                            # stopped mid-drive
-            if _seed["state"] == "idle":
-                break
-            _seed["phase"] = "planting"
-            for _ in range(_seed_cfg["seeds_per_spot"]):
-                if _seed["state"] == "idle":
-                    break
-                Bridge.call("plantSeed")
-                _seed["seeds"] += 1
-            _seed["planted"] += 1
-    finally:
-        Bridge.call("stop")
-        _seed["phase"] = "—"
-
-def _apply_seed_cfg(data):
-    _seed_cfg["gap_ms"]         = max(200, int(data.get("gap_ms", _seed_cfg["gap_ms"])))
-    _seed_cfg["seeds_per_spot"] = max(1, min(5, int(data.get("seeds_per_spot", _seed_cfg["seeds_per_spot"]))))
-    _seed_cfg["drive_speed"]    = max(60, min(255, int(data.get("drive_speed", _seed_cfg["drive_speed"]))))
-
-def on_seed_start(client, data):
-    global _seed_thread
-    _apply_seed_cfg(data)
-    if _seed["state"] == "running":
-        return
-    if _seed["state"] == "paused":              # resume
-        _seed["state"] = "running"
-        return
-    _seed.update(state="running", phase="driving", planted=0, seeds=0)
-    _seed_thread = threading.Thread(target=_seed_loop, daemon=True)
-    _seed_thread.start()
-
-def on_seed_pause(client, data):
-    if _seed["state"] == "running":
-        _seed["state"] = "paused"
-        Bridge.call("stop")
-
-def on_seed_stop(client, data):
-    _seed["state"] = "idle"
-    Bridge.call("stop")
-
+# ── Seeder ──────────────────────────────────────────────────────────────────
+# The timed seconds-based single-row mode was removed: it predated the calibrated
+# drive model and expressed spacing as a duration, so it could not hold real
+# spacing. Plot seeding (see the plot_* handlers below) replaces it — it plans in
+# metres and drives a serpentine with the calibrated dead-time/coast models.
 def on_plant_once(client, data):
-    """Manual single plant (test button) — only when a run isn't active."""
-    if _seed["state"] in ("idle",):
-        Bridge.call("plantSeed")
+    """Manual single plant (test button) — refused while a plot run is active."""
+    if _plot["state"] in ("running", "paused"):
+        return
+    Bridge.call("plantSeed")
 
 
 # ── Soil sensing (Stage 2) ──────────────────────────────────────────────────
@@ -893,7 +828,6 @@ def on_get_stats(client, data):
         "cpu":     _cpu_percent(),
         "uptime":  _uptime_str(),
         "speed":   round(_speed / 2.55),   # echo current speed % so the UI stays in sync
-        "seed":    dict(_seed),            # {state, phase, planted, seeds}
     })
 
 
@@ -904,9 +838,6 @@ ui.on_message("shutdown",      logged("shutdown",      on_shutdown))
 ui.on_message("reboot",        logged("reboot",        on_reboot))
 ui.on_message("connect_wifi",  logged("connect_wifi",  on_connect_wifi))
 ui.on_message("start_hotspot", logged("start_hotspot", on_start_hotspot))
-ui.on_message("seed_start",    logged("seed_start",    on_seed_start))
-ui.on_message("seed_pause",    logged("seed_pause",    on_seed_pause))
-ui.on_message("seed_stop",     logged("seed_stop",     on_seed_stop))
 ui.on_message("plant_once",    logged("plant_once",    on_plant_once))
 ui.on_message("soil_sample",   logged("soil_sample",   on_soil_sample))
 ui.on_message("survey_start",  logged("survey_start",  on_survey_start))

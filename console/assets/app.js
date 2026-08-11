@@ -77,35 +77,16 @@ speedSlider.addEventListener('input', () => {
   socket.emit('set_speed', { speed: Math.round(p * 2.55) });  // 0-100% → 0-255
 });
 
+// Mirror a range input's value into a label (used by Soil, Camera and Seed).
+const bind = (el, out) => {
+  const f = () => document.getElementById(out).textContent = el.value;
+  el.addEventListener('input', f); f();
+};
+
 // ── Seeder panel ─────────────────────────────────────────────────────────────
-const seedGap   = document.getElementById('seed-gap');
-const seedSpot  = document.getElementById('seed-spot');
-const seedSpeed = document.getElementById('seed-speed');
-const bind = (el, out) => { const f = () => document.getElementById(out).textContent = el.value; el.addEventListener('input', f); f(); };
-bind(seedGap, 'seed-gap-val'); bind(seedSpot, 'seed-spot-val'); bind(seedSpeed, 'seed-speed-val');
-
-const seedParams = () => ({
-  gap_ms: Math.round(parseFloat(seedGap.value) * 1000),
-  seeds_per_spot: parseInt(seedSpot.value),
-  drive_speed: Math.round(parseInt(seedSpeed.value) * 2.55),   // % → 0-255
-});
-
-document.getElementById('seed-start').addEventListener('click', () => socket.emit('seed_start', seedParams()));
-document.getElementById('seed-pause').addEventListener('click', () => socket.emit('seed_pause', {}));
-document.getElementById('seed-stop').addEventListener('click',  () => socket.emit('seed_stop', {}));
-document.getElementById('seed-plant1').addEventListener('click',() => socket.emit('plant_once', {}));
-
-function renderSeed(s) {
-  if (!s) return;
-  const el = document.getElementById('seed-status');
-  const line = {
-    idle:    'Idle',
-    running: `Running — ${s.phase} · planted ${s.planted} (${s.seeds} seeds)`,
-    paused:  `Paused · planted ${s.planted} (${s.seeds} seeds)`,
-  }[s.state] || s.state;
-  el.textContent = line;
-  el.className = 'seed-status ' + s.state;
-}
+// The run controls live in initPlot() (plot seeding). Only the manual test remains
+// here; the old seconds-based timed mode was removed.
+document.getElementById('seed-plant1').addEventListener('click', () => socket.emit('plant_once', {}));
 
 // ── Soil panel ───────────────────────────────────────────────────────────────
 const surveyInt = document.getElementById('survey-int');
@@ -236,7 +217,6 @@ socket.on('stats', (d) => {
   if (typeof d.speed === 'number') {           // keep slider synced to the robot
     speedSlider.value = d.speed; speedVal.textContent = d.speed;
   }
-  renderSeed(d.seed);
 });
 setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000);
 
