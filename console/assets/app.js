@@ -43,7 +43,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     setDriveCam(name === 'drive');        // start/stop the Drive-tab direct stream
     if (name === 'soil')   socket.emit('get_soil', {});    // prime readings immediately
     if (name === 'diag')   socket.emit('get_diag', {});
-    if (name === 'seed') { socket.emit('get_plot', {}); socket.emit('get_drip', {}); }
+    if (name === 'seed')   socket.emit('get_plot', {});
     if (name === 'camera') { socket.emit('get_vision', {}); socket.emit('get_capture', {}); }
   });
 });
@@ -125,8 +125,9 @@ document.getElementById('cam-set').addEventListener('click', () => {
   socket.emit('get_vision', {});           // begins the annotated-frame push
 });
 
-document.getElementById('drip-start').addEventListener('click', () => socket.emit('drip_start', {}));
-document.getElementById('drip-stop').addEventListener('click',  () => socket.emit('drip_stop', {}));
+// Cam tab shortcuts for the same unified run (Seed tab owns the config)
+document.getElementById('drip-start').addEventListener('click', () => socket.emit('run_start', { mode: 'drip' }));
+document.getElementById('drip-stop').addEventListener('click',  () => socket.emit('run_stop', {}));
 
 // ── Dataset capture (collect the emitter training set while driving) ──────────
 const capInt = document.getElementById('cap-int');
@@ -235,28 +236,17 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
     row_gap: +document.getElementById('pt-rowgap').value / 100,   // cm in UI, m on the wire
     seed_gap: +document.getElementById('pt-seedgap').value / 100,
     seeds_per_spot: +document.getElementById('pt-spot').value,
-    dry: document.getElementById('pt-dry').checked,
   });
   Object.values(cfgEls).forEach(id =>
     document.getElementById(id).addEventListener('change', sendCfg));
   document.getElementById('pt-spot').addEventListener('input', () => {
     document.getElementById('pt-spot-val').textContent = document.getElementById('pt-spot').value;
   });
-  document.getElementById('pt-dry').addEventListener('change', sendCfg);
 
   marks.querySelectorAll('.pt-mark').forEach(b =>
     b.addEventListener('click', () => socket.emit('plot_mark', { corner: +b.dataset.c })));
   document.getElementById('pt-clear').addEventListener('click',
     () => socket.emit('plot_clear', {}));
-  document.getElementById('pt-start').addEventListener('click', () => {
-    const dry = document.getElementById('pt-dry').checked;
-    // it drives itself across the plot — make that explicit, and louder if armed
-    if (!confirm(dry ? 'Start the dry run?\n\nThe robot will drive the whole plot. Keep the area clear.'
-                     : '⚠ SEEDER ARMED\n\nThe robot will drive the whole plot and plant at every spot. Continue?')) return;
-    socket.emit('plot_start', {});
-  });
-  document.getElementById('pt-pause').addEventListener('click', () => socket.emit('plot_pause', {}));
-  document.getElementById('pt-stop').addEventListener('click',  () => socket.emit('plot_stop', {}));
 
   const mmss = s => `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 
@@ -297,19 +287,52 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
 
   socket.on('plot', d => {
     draw(d);
-    const st = document.getElementById('seed-status');
-    const label = { idle: 'Idle', running: 'Running', paused: 'Paused',
-                    done: 'Done', stopped: 'Stopped', error: 'Error' }[d.state] || d.state;
-    st.textContent = label + (d.msg ? ' — ' + d.msg : '');
-    st.className = 'seed-status ' + (d.state === 'running' ? 'running' : '');
     marks.querySelectorAll('.pt-mark').forEach((b, i) =>
       b.classList.toggle('marked', i < (d.corners || []).length));
   });
 
-  socket.on('plot_report', d => {
+  socket.on('run_report', d => {
     const box = document.getElementById('pt-report');
     document.getElementById('pt-report-svg').innerHTML = d.svg || '';
     box.hidden = !d.svg;
+  });
+})();
+
+// ── Shared run controls — same for both land types ──────────────────────────
+// The robot does the same job either way (drive, stop, plant, log, report); only
+// the plant trigger differs. So one status line, one dry-run toggle, one Start.
+(function initRun() {
+  const statusEl = document.getElementById('run-status');
+  if (!statusEl) return;
+  const dryEl = document.getElementById('run-dry');
+  const mode  = () => document.querySelector('#seg-land .seg-btn.active')?.dataset.v || 'plain';
+
+  dryEl.addEventListener('change', () => socket.emit('plot_config', { dry: dryEl.checked }));
+
+  document.getElementById('run-start').addEventListener('click', () => {
+    const dry = dryEl.checked, m = mode();
+    const what = m === 'drip'
+      ? 'follow the drip line and stop at each emitter'
+      : 'drive the whole plot';
+    if (!confirm(dry ? `Start the dry run?\n\nThe robot will ${what}. Keep the area clear.`
+                     : `⚠ SEEDER ARMED\n\nThe robot will ${what} and plant. Continue?`)) return;
+    socket.emit('run_start', { mode: m, dry });
+  });
+  document.getElementById('run-pause').addEventListener('click', () => socket.emit('run_pause', {}));
+  document.getElementById('run-stop').addEventListener('click',  () => socket.emit('run_stop', {}));
+
+  socket.on('run', d => {
+    const label = { idle: 'Idle', running: 'Running', paused: 'Paused',
+                    done: 'Done', stopped: 'Stopped', error: 'Error' }[d.state] || d.state;
+    // plain knows its total up front; drip only has an estimate from the spacing
+    const total = d.mode === 'drip' ? `~${d.expected ?? '?'}` : (d.total || 0);
+    const unit  = d.mode === 'drip' ? 'emitters' : 'spots';
+    statusEl.textContent = `${label} · ${d.mode} · ${d.planted || 0}/${total} ${unit}`
+      + (d.dry ? ' · dry run' : ' · SEEDER ARMED') + (d.msg ? ' — ' + d.msg : '');
+    statusEl.className = 'seed-status ' + (d.state === 'running' ? 'running' : '');
+    // drip can't be paused mid-follow (the camera loop drives it) — stop instead
+    document.getElementById('run-pause').disabled = d.mode === 'drip';
+    if (dryEl.checked !== !!d.dry) dryEl.checked = !!d.dry;
   });
 })();
 
@@ -318,14 +341,11 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
   const svg = document.getElementById('dr-svg');
   if (!svg) return;
   const gapEl = document.getElementById('dr-gap');
-  const rotEl = document.getElementById('dr-rotate');
-  const dryEl = document.getElementById('dr-dry');
   const hint  = document.getElementById('dr-hint');
-  let angle = 0;
+  let angles = [0, 90];          // arm positions to plant at; each drops 2 seeds
 
   const sendCfg = () => socket.emit('drip_config', {
-    emitter_gap: +gapEl.value / 100, rotate: rotEl.checked,
-    angle, dry: dryEl.checked,
+    emitter_gap: +gapEl.value / 100, angles,
   });
 
   // Land selector shows one flow or the other — they take different inputs.
@@ -338,60 +358,65 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
       document.querySelectorAll('.only-plain').forEach(el => el.hidden = land !== 'plain');
       document.querySelectorAll('.only-drip').forEach(el => el.hidden = land !== 'drip');
       socket.emit('plot_config', { land });
-      if (land === 'drip') socket.emit('get_drip', {});
     }));
 
+  // multi-select: the arm visits every selected position at each emitter
   document.querySelectorAll('#dr-angles .dr-ang').forEach(b =>
     b.addEventListener('click', () => {
-      angle = +b.dataset.a;
-      document.querySelectorAll('#dr-angles .dr-ang').forEach(x =>
-        x.classList.toggle('active', x === b));
-      // choosing an angle implies you want rotation
-      if (angle !== 0) rotEl.checked = true;
-      drawArm(); sendCfg();
+      const a = +b.dataset.a;
+      if (angles.includes(a)) {
+        if (angles.length === 1) return;        // keep at least one position
+        angles = angles.filter(x => x !== a);
+      } else {
+        angles = [...angles, a].sort((x, y) => x - y);
+      }
+      syncChips(); drawArm(); sendCfg();
     }));
-  [gapEl, rotEl, dryEl].forEach(el => el.addEventListener('change', () => { drawArm(); sendCfg(); }));
+  gapEl.addEventListener('change', sendCfg);
 
-  function drawArm() {
-    const rot = rotEl.checked, a = rot ? angle : 0;
-    // Two outlets 180 deg apart on one arm: choosing `a` also places one at a+180.
-    const rad = a * Math.PI / 180, R = 26;
-    const cx = 50, cy = 50;
-    const p1 = [cx + R * Math.cos(rad), cy - R * Math.sin(rad)];
-    const p2 = [cx - R * Math.cos(rad), cy + R * Math.sin(rad)];
-    svg.innerHTML = `
-      <line x1="4" y1="${cy}" x2="96" y2="${cy}" class="dr-line"/>
-      <text x="6" y="${cy - 4}" class="dr-lbl">drip line</text>
-      <line x1="${p1[0].toFixed(1)}" y1="${p1[1].toFixed(1)}"
-            x2="${p2[0].toFixed(1)}" y2="${p2[1].toFixed(1)}" class="dr-arm"/>
-      <circle cx="${cx}" cy="${cy}" r="4.5" class="dr-emit"/>
-      <text x="${cx}" y="${cy + 1.6}" class="dr-elbl">E</text>
-      <circle cx="${p1[0].toFixed(1)}" cy="${p1[1].toFixed(1)}" r="4" class="dr-seed"/>
-      <circle cx="${p2[0].toFixed(1)}" cy="${p2[1].toFixed(1)}" r="4" class="dr-seed"/>
-      <text x="${p1[0].toFixed(1)}" y="${(p1[1] - 6).toFixed(1)}" class="dr-alab">${a}°</text>
-      <text x="${p2[0].toFixed(1)}" y="${(p2[1] + 9).toFixed(1)}" class="dr-alab">${a + 180}°</text>`;
-    hint.textContent = rot
-      ? `Arm rotated to ${a}° — the second outlet lands at ${a + 180}°. 2 seeds per emitter.`
-      : 'Arm flat: 2 seeds along the drip line (0° / 180°). 2 seeds per emitter.';
+  function syncChips() {
+    document.querySelectorAll('#dr-angles .dr-ang').forEach(x =>
+      x.classList.toggle('active', angles.includes(+x.dataset.a)));
   }
 
-  document.getElementById('dr-start').addEventListener('click', () => {
-    const dry = dryEl.checked;
-    if (!confirm(dry ? 'Follow the drip line?\n\nThe robot will drive along the tube and stop at each emitter. Keep the area clear.'
-                     : '⚠ SEEDER ARMED\n\nThe robot will follow the tube and plant at every emitter it detects. Continue?')) return;
-    socket.emit('drip_start', {
-      emitter_gap: +gapEl.value / 100, rotate: rotEl.checked, angle, dry,
+  function drawArm() {
+    const cx = 50, cy = 50, R = 26;
+    // Each selected position contributes a PAIR of seeds, 180 deg apart.
+    const bits = [`<line x1="4" y1="${cy}" x2="96" y2="${cy}" class="dr-line"/>`,
+                  `<text x="6" y="${cy - 4}" class="dr-lbl">drip line</text>`];
+    angles.forEach((a, i) => {
+      const rad = a * Math.PI / 180;
+      const p1 = [cx + R * Math.cos(rad), cy - R * Math.sin(rad)];
+      const p2 = [cx - R * Math.cos(rad), cy + R * Math.sin(rad)];
+      bits.push(`<line x1="${p1[0].toFixed(1)}" y1="${p1[1].toFixed(1)}"
+                       x2="${p2[0].toFixed(1)}" y2="${p2[1].toFixed(1)}" class="dr-arm"/>`);
+      [[p1, a], [p2, a + 180]].forEach(([p, lab]) => {
+        bits.push(`<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" class="dr-seed"/>`);
+        // order of planting, so the sequence is readable
+        bits.push(`<text x="${p[0].toFixed(1)}" y="${(p[1] + 1.4).toFixed(1)}" class="dr-seq">${i + 1}</text>`);
+        const off = p[1] < cy ? -6 : 9;
+        bits.push(`<text x="${p[0].toFixed(1)}" y="${(p[1] + off).toFixed(1)}" class="dr-alab">${lab}°</text>`);
+      });
     });
-  });
-  document.getElementById('dr-stop').addEventListener('click', () => socket.emit('drip_stop', {}));
+    bits.push(`<circle cx="${cx}" cy="${cy}" r="4.5" class="dr-emit"/>`,
+              `<text x="${cx}" y="${cy + 1.6}" class="dr-elbl">E</text>`);
+    svg.innerHTML = bits.join('');
+    const seeds = angles.length * 2;
+    hint.textContent = angles.length > 1 || angles[0] !== 0
+      ? `${seeds} seeds per emitter — arm plants at ${angles.map(a => `${a}°/${a + 180}°`).join(', then ')}.`
+      : '2 seeds per emitter — arm stays flat along the line (0°/180°), no rotation.';
+  }
 
-  socket.on('drip', d => {
-    const st = document.getElementById('dr-status');
-    st.textContent = (d.state === 'following' ? 'Following the line' : 'Idle')
-      + ` — ${d.planted || 0}/${d.expected || '?'} emitters planted`
-      + (d.msg ? ' · ' + d.msg : '');
-    st.className = 'seed-status ' + (d.state === 'following' ? 'running' : '');
 
+  // readiness + config sync — run status is the shared 'run' handler
+  socket.on('run', d => {
+    // reflect server-side config so a reload/reconnect doesn't show stale settings
+    if (d.emitter_gap != null) gapEl.value = Math.round(d.emitter_gap * 100);
+    if (Array.isArray(d.angles) && d.angles.join() !== angles.join()) {
+      angles = d.angles.slice();
+      syncChips();
+    }
+    drawArm();
     const ok = d.cam_connected && d.detector !== 'unavailable';
     document.getElementById('dr-ready').innerHTML =
       `<span class="${ok ? 'dr-ok' : 'dr-bad'}">${ok ? '● ready' : '● not ready'}</span>` +
@@ -401,7 +426,7 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
       (d.emitter_conf != null ? ` · emitter conf ${d.emitter_conf}` : '');
   });
 
-  drawArm();
+  syncChips(); drawArm();
 })();
 
 // ── Diag: trace one command browser → console → MCU → pins → motor current ──

@@ -122,14 +122,13 @@
 
         <div class="card only-drip" hidden>
           <h2>Seed placement</h2>
-          <p class="hint">Pick the <b>arm positions</b> to plant at. Each one drops
-            2 seeds (the outlets sit 180° apart), so <b>0° + 90°</b> makes a 4-seed
-            cross. The robot stops once per emitter and works through them in order.</p>
+          <label class="pt-dry"><input type="checkbox" id="dr-rotate">
+            Rotate the arm (otherwise it stays flat along the line)</label>
           <div class="dr-angles" id="dr-angles">
-            <button class="dr-ang active" data-a="0">0°<small>0/180</small></button>
-            <button class="dr-ang" data-a="45">45°<small>45/225</small></button>
-            <button class="dr-ang active" data-a="90">90°<small>90/270</small></button>
-            <button class="dr-ang" data-a="135">135°<small>135/315</small></button>
+            <button class="dr-ang active" data-a="0">0°</button>
+            <button class="dr-ang" data-a="45">45°</button>
+            <button class="dr-ang" data-a="90">90°</button>
+            <button class="dr-ang" data-a="135">135°</button>
           </div>
           <div class="dr-diagram">
             <svg id="dr-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
@@ -326,7 +325,24 @@
     <button class="tab" data-tab="settings">⚙ Settings</button>
   </nav>
 
-  <script src="libs/socket.io.min.js"></script>
+  <script>
+window.io = function () { const h = {};
+  return { connected: true, on: (e, f) => (h[e] = h[e] || []).push(f), emit: () => {},
+           _fire: (e, d) => (h[e] || []).forEach(f => f(d)) }; };
+</script>
   <script src="app.js"></script>
-</body>
+<script>
+document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+document.getElementById('panel-seed').classList.add('active');
+socket._fire('plot', {"land": "plain", "corners": [1, 2, 3, 4], "w": 5.0, "l": 5.0, "row_gap": 0.4, "seed_gap": 0.4, "seeds_per_spot": 1, "dry": true, "state": "running", "planted": 58, "spot": 58, "total": 144, "msg": "", "planned": [[0.2, 0.2], [0.2, 0.6], [0.2, 1.0], [0.2, 1.4], [0.2, 1.8], [0.2, 2.2], [0.2, 2.6], [0.2, 3.0], [0.2, 3.4], [0.2, 3.8], [0.2, 4.2], [0.2, 4.6], [0.6, 4.6], [0.6, 4.2], [0.6, 3.8], [0.6, 3.4], [0.6, 3.0], [0.6, 2.6], [0.6, 2.2], [0.6, 1.8], [0.6, 1.4], [0.6, 1.0], [0.6, 0.6], [0.6, 0.2], [1.0, 0.2], [1.0, 0.6], [1.0, 1.0], [1.0, 1.4], [1.0, 1.8], [1.0, 2.2], [1.0, 2.6], [1.0, 3.0], [1.0, 3.4], [1.0, 3.8], [1.0, 4.2], [1.0, 4.6], [1.4, 4.6], [1.4, 4.2], [1.4, 3.8], [1.4, 3.4], [1.4, 3.0], [1.4, 2.6], [1.4, 2.2], [1.4, 1.8], [1.4, 1.4], [1.4, 1.0], [1.4, 0.6], [1.4, 0.2], [1.8, 0.2], [1.8, 0.6], [1.8, 1.0], [1.8, 1.4], [1.8, 1.8], [1.8, 2.2], [1.8, 2.6], [1.8, 3.0], [1.8, 3.4], [1.8, 3.8], [1.8, 4.2], [1.8, 4.6], [2.2, 4.6], [2.2, 4.2], [2.2, 3.8], [2.2, 3.4], [2.2, 3.0], [2.2, 2.6], [2.2, 2.2], [2.2, 1.8], [2.2, 1.4], [2.2, 1.0], [2.2, 0.6], [2.2, 0.2], [2.6, 0.2], [2.6, 0.6], [2.6, 1.0], [2.6, 1.4], [2.6, 1.8], [2.6, 2.2], [2.6, 2.6], [2.6, 3.0], [2.6, 3.4], [2.6, 3.8], [2.6, 4.2], [2.6, 4.6], [3.0, 4.6], [3.0, 4.2], [3.0, 3.8], [3.0, 3.4], [3.0, 3.0], [3.0, 2.6], [3.0, 2.2], [3.0, 1.8], [3.0, 1.4], [3.0, 1.0], [3.0, 0.6], [3.0, 0.2], [3.4, 0.2], [3.4, 0.6], [3.4, 1.0], [3.4, 1.4], [3.4, 1.8], [3.4, 2.2], [3.4, 2.6], [3.4, 3.0], [3.4, 3.4], [3.4, 3.8], [3.4, 4.2], [3.4, 4.6], [3.8, 4.6], [3.8, 4.2], [3.8, 3.8], [3.8, 3.4], [3.8, 3.0], [3.8, 2.6], [3.8, 2.2], [3.8, 1.8], [3.8, 1.4], [3.8, 1.0], [3.8, 0.6], [3.8, 0.2], [4.2, 0.2], [4.2, 0.6], [4.2, 1.0], [4.2, 1.4], [4.2, 1.8], [4.2, 2.2], [4.2, 2.6], [4.2, 3.0], [4.2, 3.4], [4.2, 3.8], [4.2, 4.2], [4.2, 4.6], [4.6, 4.6], [4.6, 4.2], [4.6, 3.8], [4.6, 3.4], [4.6, 3.0], [4.6, 2.6], [4.6, 2.2], [4.6, 1.8], [4.6, 1.4], [4.6, 1.0], [4.6, 0.6], [4.6, 0.2]], "summary": {"rows": 12, "seeds_per_row": 12, "spots": 144, "seeds_total": 144}, "est_s": 130}); socket._fire('run', {"mode": "plain", "state": "running", "planted": 58, "total": 144, "msg": "", "dry": true, "emitter_gap": 0.4, "rotate": false, "angle": 0, "cam_connected": false, "detector": "classical CV", "tube_found": false, "emitter_conf": null, "expected": 13});
+window.__probe = () => ({
+  status: document.getElementById('run-status').innerText,
+  pauseDisabled: document.getElementById('run-pause').disabled,
+  ready: document.getElementById('dr-ready').innerText,
+});
+window.__toDrip = () => {
+  document.querySelector('#seg-land .seg-btn[data-v="drip"]').click();
+  socket._fire('run', {"mode": "drip", "state": "running", "planted": 7, "total": 0, "msg": "", "dry": false, "emitter_gap": 0.4, "rotate": true, "angle": 135, "cam_connected": true, "detector": "ML/Edge-Impulse", "tube_found": true, "emitter_conf": 0.71, "expected": 13});
+};
+</script></body>
 </html>

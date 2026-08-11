@@ -44,6 +44,7 @@ except Exception as _e:                      # noqa: BLE001
 _PLOT_OK = False
 try:
     from farmos import SeedPlan, plan_boustrophedon, execute
+    from farmos.executor import RunLog
     from farmos.path import plan_summary
     from farmos.report import render_svg
     from farmos.robot_io import BridgeRobot
@@ -182,7 +183,7 @@ def on_start_hotspot(client, data):
 # metres and drives a serpentine with the calibrated dead-time/coast models.
 def on_plant_once(client, data):
     """Manual single plant (test button) — refused while a plot run is active."""
-    if _plot["state"] in ("running", "paused"):
+    if _run["state"] in ("running", "paused"):
         return
     Bridge.call("plantSeed")
 
@@ -315,12 +316,12 @@ _cam = {"url": "", "w": 0, "h": 0, "tube": None, "emitter": None, "watch": 0.0}
 # The seeder arm carries 2 outlets 180° apart and one solenoid fires both, so a
 # single plantSeed drops 2 seeds. `angle` rotates that pair: 0° lays them along
 # the drip line, 90° across it. The opposite outlet always lands at angle+180.
-_drip = {
-    "state": "idle",               # idle | following
-    "emitter_gap": 0.40, "rotate": False, "angle": 0, "dry": True,
-    "planted": 0, "msg": "",
-}
-_ARM_DWELL_S = 0.6                 # let the spool servo reach the angle before dropping
+# `angles` are ARM POSITIONS to plant at, in order. Each one drops 2 seeds (the
+# two outlets are 180 deg apart and one solenoid fires both), so [0, 90] plants a
+# 4-seed cross per emitter: 0/180, then rotate, then 90/270.
+_drip = {"emitter_gap": 0.40, "angles": [0, 90]}
+_ARM_DWELL_S  = 0.6      # let the spool servo reach the angle before dropping
+_MIN_REPLANT_M = 0.08    # anti-flicker floor only; NOT the emitter spacing
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
 _WATCH_TTL   = 2.0                 # keep pushing this long after the last get_vision poll
@@ -400,8 +401,9 @@ def _stream_url(base):
     return "http://%s/stream" % hostport
 
 def _cam_loop(url):
-    last_plant = 0.0
-    dist_since_plant = 1e9      # start "far" so the first emitter is never rejected
+    travelled = 0.0             # estimated distance along the lateral this run
+    last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
+    armed = True                # detection-edge debounce (see the drip branch)
     driving_since = None        # when the current drive segment began
     last_push = 0.0
     push_interval = 1.0 / _BROWSER_FPS
@@ -435,35 +437,54 @@ def _cam_loop(url):
             _save_capture(frame)
             _capture["last"] = now
 
-        if _drip["state"] == "following":
-            # Reject a re-detection of the SAME emitter by distance, not just time:
-            # a time cooldown is speed-dependent, so it either double-plants when
-            # slow or skips emitters when fast. Distance is estimated from the
-            # calibrated cruise speed while actually driving (no encoders).
-            min_gap = 0.6 * _drip["emitter_gap"]
-            if emit["detected"] and emit["confidence"] >= _EMIT_CONF \
-                    and dist_since_plant >= min_gap:
+        if _run["mode"] == "drip" and _run["state"] == "running":
+            detected = emit["detected"] and emit["confidence"] >= _EMIT_CONF
+            # Debounce on the DETECTION EDGE, not on an assumed spacing: the model is
+            # what finds emitters, so "this one again" means "still in view". Re-arm
+            # once it clears. _MIN_REPLANT_M is only a floor against flicker, well
+            # below any real spacing — the operator's spacing figure never gates a
+            # plant, so a missed emitter just means the next one is found normally.
+            if detected and armed and travelled - last_plant_at >= _MIN_REPLANT_M:
                 _drive_stop("drip")
-                if _drip["rotate"]:
-                    Bridge.call("indexSpool", int(_drip["angle"]))
-                    time.sleep(_ARM_DWELL_S)          # servo needs to arrive first
-                if not _drip["dry"]:
-                    Bridge.call("plantSeed")          # both outlets: 2 seeds, angle apart
-                _drip["planted"] += 1
-                last_plant = time.time()
-                dist_since_plant = 0.0
-                ui.send_message("drip", _drip_state())
-            elif tube["found"]:
-                c = tube["correction"]
-                l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
-                               int(_BASE_PWM - _STEER_GAIN * c))
-                _drive(max(0, min(255, l)), max(0, min(255, r)), "drip", "forward")
-                if driving_since:                     # integrate travel while moving
-                    dist_since_plant += (now - driving_since) * _DRIP_SPEED_MPS
-                driving_since = now
-            else:
-                _drive_stop("drip")                   # lost the tube — don't drive blind
-                driving_since = None
+                # One stop, then plant at EVERY selected arm position: [0, 90] gives
+                # a 4-seed cross (0/180 then 90/270).
+                for a in _drip["angles"]:
+                    if _drip_rotates():
+                        Bridge.call("indexSpool", int(a))
+                        time.sleep(_ARM_DWELL_S)      # servo must arrive before the drop
+                    if not _run["dry"]:
+                        Bridge.call("plantSeed")      # both outlets: 2 seeds, 180 apart
+                if _drip_rotates():
+                    Bridge.call("indexSpool", 0)      # leave the arm flat for driving
+                _run["planted"] += 1
+                _run["positions"].append((0.0, round(travelled, 3)))
+                armed = False
+                last_plant_at = travelled
+                _emit_run()
+            elif not detected:
+                armed = True                          # emitter left view — ready for the next
+
+            # End of lateral is the MARKED plot length, so a long real lateral can be
+            # demoed over a deliberately shorter marked plot.
+            if travelled >= _plot["l"]:
+                _drive_stop("drip")
+                _run["state"] = "done"
+                _run["msg"] = ("reached the marked plot length (%.1f m) — %d emitters"
+                               % (_plot["l"], _run["planted"]))
+                _emit_report(_drip_runlog())
+                _emit_run()
+            elif not detected or not armed:
+                if tube["found"]:
+                    c = tube["correction"]
+                    l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
+                                   int(_BASE_PWM - _STEER_GAIN * c))
+                    _drive(max(0, min(255, l)), max(0, min(255, r)), "drip", "forward")
+                    if driving_since:                 # integrate travel while moving
+                        travelled += (now - driving_since) * _DRIP_SPEED_MPS
+                    driving_since = now
+                else:
+                    _drive_stop("drip")               # lost the tube — don't drive blind
+                    driving_since = None
         else:
             driving_since = None
 
@@ -479,7 +500,7 @@ def _cam_loop(url):
                         "jpeg": base64.b64encode(buf).decode("ascii"),
                         "vision_ok": True,        # frames only flow when vision is up
                         "w": w, "h": h, "tube": tube, "emitter": emit,
-                        "drip": _drip["state"],
+                        "drip": _drip_ui_state(),
                     })
                     last_push = now
             except Exception as e:                       # noqa: BLE001
@@ -503,23 +524,40 @@ def on_get_vision(client, data):
         "vision_ok": _VISION_OK,
         "w": _cam["w"], "h": _cam["h"],
         "tube": _cam["tube"], "emitter": _cam["emitter"],
-        "drip": _drip["state"],
+        "drip": _drip_ui_state(),
     })
 
-def _drip_state():
-    """Drip status + readiness. The camera IS the trigger, so surface its state."""
+def _drip_rotates():
+    """True if the spool has to move at all — a single 0 deg position needs no rotation."""
+    a = _drip["angles"]
+    return len(a) > 1 or (a and a[0] != 0)
+
+
+def _drip_seeds_per_emitter():
+    return 2 * max(1, len(_drip["angles"]))       # 2 outlets per arm position
+
+
+def _drip_ui_state():
+    """"following"/"idle" for the camera overlay, which predates the unified run."""
+    return "following" if (_run["mode"] == "drip" and _run["state"] == "running") else "idle"
+
+
+def _drip_readiness():
+    """Camera readiness — the model IS the plant trigger, so surface its state."""
     emit = _cam.get("emitter") or {}
     tube = _cam.get("tube") or {}
     gap = max(0.05, _drip["emitter_gap"])
     return {
-        **{k: _drip[k] for k in
-           ("state", "emitter_gap", "rotate", "angle", "dry", "planted", "msg")},
+        "emitter_gap": _drip["emitter_gap"],
+        "angles": list(_drip["angles"]),
+        "rotates": _drip_rotates(),
+        "seeds_per_emitter": _drip_seeds_per_emitter(),
         "cam_connected": bool(_cam["url"]),
         "detector": ("ML/Edge-Impulse" if (_VISION_OK and ml_available())
                      else "classical CV" if _VISION_OK else "unavailable"),
         "tube_found": bool(tube.get("found")),
         "emitter_conf": emit.get("confidence"),
-        # rough expectation over the marked plot: one lateral's worth of emitters
+        # only an ESTIMATE for the counter — it never gates a plant
         "expected": int(_plot["l"] / gap) + 1,
     }
 
@@ -527,38 +565,12 @@ def _drip_state():
 def on_drip_config(client, data):
     if "emitter_gap" in data:
         _drip["emitter_gap"] = max(0.05, float(data["emitter_gap"]))
-    if "rotate" in data:
-        _drip["rotate"] = bool(data["rotate"])
-    if "angle" in data:
-        _drip["angle"] = int(data["angle"]) % 180      # angle+180 is the other outlet
-    if "dry" in data:
-        _drip["dry"] = bool(data["dry"])
-    ui.send_message("drip", _drip_state())
-
-
-def on_get_drip(client, data):
-    ui.send_message("drip", _drip_state())
-
-
-def on_drip_start(client, data):
-    on_drip_config(client, data)               # accept config sent with Start
-    if not (_VISION_OK and _cam["url"]):
-        _drip["msg"] = "connect the camera first — the emitter model is the trigger"
-    elif len(_plot["corners"]) < 4:
-        _drip["msg"] = "mark all 4 corners first"
-    else:
-        _drip.update(state="following", planted=0, msg="")
-        log("drip run: gap~%.2fm, %s, %s" % (
-            _drip["emitter_gap"],
-            "arm @ %d/%d deg" % (_drip["angle"], _drip["angle"] + 180)
-            if _drip["rotate"] else "arm flat (0/180 deg)",
-            "DRY (no seeder)" if _drip["dry"] else "seeder ARMED"))
-    ui.send_message("drip", _drip_state())
-
-def on_drip_stop(client, data):
-    _drip["state"] = "idle"
-    _drive_stop("drip")
-    ui.send_message("drip", _drip_state())
+    if "angles" in data:
+        # sanitise: each is an arm position mod 180 (its pair lands at +180),
+        # de-duplicated and ordered so the spool sweeps one way; never empty.
+        vals = sorted({int(a) % 180 for a in (data["angles"] or [])})
+        _drip["angles"] = vals or [0]
+    _emit_run()
 
 # ── Dataset capture (drive the drip line, collect the emitter training set) ──
 def _save_capture(frame):
@@ -707,9 +719,18 @@ CAL = {
 _plot = {
     "land": "plain",
     "corners": [], "w": 5.0, "l": 5.0,
-    "row_gap": 0.40, "seed_gap": 0.40, "seeds_per_spot": 1, "dry": True,
+    "row_gap": 0.40, "seed_gap": 0.40, "seeds_per_spot": 1,
+}
+
+# ONE run for both land types. The robot does the same job either way — drive,
+# stop, plant, log, report — only the PLANT TRIGGER differs: a planned grid
+# position (plain) or an emitter the model saw (drip). So state, controls, dry
+# run, progress and the report are shared; only the config cards differ.
+_run = {
+    "mode": "plain",            # plain | drip
     "state": "idle",            # idle | running | paused | done | stopped | error
-    "spot": 0, "total": 0, "msg": "",
+    "planted": 0, "total": 0, "msg": "", "dry": True,
+    "positions": [],            # where seeds actually went, for the report
 }
 _plot_thread = None
 
@@ -734,7 +755,7 @@ def _plot_preview():
     summary = plan_summary(cfg)
     # rough time: each hop is startup + gap/speed, plus ~1.3s per plant (punch+drop)
     hop = CAL["startup"] + _plot["seed_gap"] / CAL["speed"]
-    plant_s = 0.0 if _plot["dry"] else 1.3 * int(_plot["seeds_per_spot"])
+    plant_s = 0.0 if _run["dry"] else 1.3 * int(_plot["seeds_per_spot"])
     turns = max(0, summary.get("rows", 0) - 1) * 2
     est = len(path) * (hop + plant_s) + turns * (CAL["tstartup"] + 90 / CAL["tdps"])
     return {"planned": [[w.x, w.y] for w in path], "summary": summary,
@@ -743,11 +764,20 @@ def _plot_preview():
 
 def _emit_plot(preview=False):
     msg = {k: _plot[k] for k in
-           ("land", "corners", "w", "l", "row_gap", "seed_gap", "seeds_per_spot",
-            "dry", "state", "spot", "total", "msg")}
+           ("land", "corners", "w", "l", "row_gap", "seed_gap", "seeds_per_spot")}
+    msg.update({k: _run[k] for k in ("state", "planted", "total", "msg", "dry")})
+    msg["spot"] = _run["planted"]                  # progress dots on the plan overlay
     if preview:
         msg.update(_plot_preview())
     ui.send_message("plot", msg)
+
+
+def _emit_run():
+    """Shared run status for both land types (state, progress, drip readiness)."""
+    ui.send_message("run", {**{k: _run[k] for k in
+                               ("mode", "state", "planted", "total", "msg", "dry")},
+                            **_drip_readiness()})
+    _emit_plot()                                   # keep the plan overlay in step
 
 
 class _ProgressRobot(BridgeRobot):
@@ -758,9 +788,9 @@ class _ProgressRobot(BridgeRobot):
     """
 
     def _gate(self):
-        while _plot["state"] == "paused":
+        while _run["state"] == "paused":
             time.sleep(0.2)
-        if _plot["state"] != "running":
+        if _run["state"] != "running":
             raise _Abort()
 
     def forward(self, distance_m):
@@ -774,46 +804,81 @@ class _ProgressRobot(BridgeRobot):
     def plant(self):
         self._gate()
         super().plant()
-        _plot["spot"] += 1
-        _emit_plot()
+        _run["planted"] += 1
+        _emit_run()
 
 
 def _plot_loop():
     cfg = _plot_cfg()
     path = plan_boustrophedon(cfg)
-    _plot["total"] = len(path) * int(_plot["seeds_per_spot"])
-    _plot["spot"] = 0
+    _run["total"] = len(path) * int(_plot["seeds_per_spot"])
+    _run["planted"] = 0
     robot = _ProgressRobot(
         speed_mps=CAL["speed"], startup_s=CAL["startup"], pwm=int(CAL["pwm"]),
         left_trim=CAL["ltrim"], right_trim=CAL["rtrim"],
         turn_pwm=int(CAL["turn_pwm"]), turn_deg_per_s=CAL["tdps"],
         turn_startup_s=CAL["tstartup"], turn_ramp_s=CAL["tramp"],
-        plant_enabled=not _plot["dry"], batt_comp=False)
-    log("plot run: %d spots, %s" % (len(path), "DRY (no seeder)" if _plot["dry"]
-                                    else "seeder ARMED"))
-    _emit_plot()
+        plant_enabled=not _run["dry"], batt_comp=False)
+    log("plain run: %d spots, %s" % (len(path), "DRY (no seeder)" if _run["dry"]
+                                     else "seeder ARMED"))
+    _emit_run()
     try:
         runlog = execute(cfg, path, robot)
-        _plot["state"] = "done"
-        _plot["msg"] = "finished — %d spots" % len(runlog.executed)
-        ui.send_message("plot_report", {"svg": render_svg(runlog),
-                                        "stats": runlog.stats})
+        _run["state"] = "done"
+        _run["msg"] = "finished — %d spots" % len(runlog.executed)
+        _emit_report(runlog)
     except _Abort:
-        _plot["msg"] = "stopped by operator"
+        _run["msg"] = "stopped by operator"
     except Exception as e:                       # noqa: BLE001
-        _plot["state"] = "error"
-        _plot["msg"] = str(e)
-        log("plot run FAILED: %s" % e)
+        _run["state"] = "error"
+        _run["msg"] = str(e)
+        log("plain run FAILED: %s" % e)
     finally:
         try:
             _drive_stop("plot")
         except Exception:                        # noqa: BLE001
             pass
         if robot.warnings:                       # MCU disagreed with what we sent
-            _plot["msg"] += " · %d diag warning(s)" % len(robot.warnings)
+            _run["msg"] += " · %d diag warning(s)" % len(robot.warnings)
             for w in robot.warnings:
-                log("plot diag: %s" % w)
-        _emit_plot()
+                log("run diag: %s" % w)
+        _emit_run()
+
+
+def _emit_report(runlog):
+    """Shared Act-4 report for both land types."""
+    try:
+        ui.send_message("run_report", {"svg": render_svg(runlog),
+                                       "stats": runlog.stats})
+    except Exception as e:                       # noqa: BLE001
+        log("report render failed: %s" % e)
+
+
+def _drip_runlog():
+    """Build a RunLog from the emitters we actually planted, so drip gets a report too.
+
+    There is no planned grid here — the model discovers the emitters — so `planned`
+    is empty and render_svg simply draws no planned dots.
+    """
+    pts = list(_run["positions"])
+    gaps = [abs(pts[i + 1][1] - pts[i][1]) for i in range(len(pts) - 1)]
+    mean_gap = round(sum(gaps) / len(gaps), 4) if gaps else 0.0
+    per = _drip_seeds_per_emitter()
+    return RunLog(
+        config=_plot_cfg().to_dict(),
+        planned=[],
+        executed=[(round(x, 4), round(y, 4)) for x, y in pts],
+        summary={"rows": 1, "seeds_per_row": len(pts),
+                 "spots": len(pts), "seeds_total": len(pts) * per},
+        stats={"distance_m": round(pts[-1][1], 3) if pts else 0.0,
+               "est_run_time_s": 0.0,
+               "planned_spacing": {"mean_gap_m": 0.0, "min_gap_m": 0.0, "max_gap_m": 0.0},
+               "executed_spacing": {"mean_gap_m": mean_gap,
+                                    "min_gap_m": round(min(gaps), 4) if gaps else 0.0,
+                                    "max_gap_m": round(max(gaps), 4) if gaps else 0.0},
+               "max_position_error_m": 0.0,       # no planned grid to compare against
+               "trigger": "emitter detection (%s)" % _drip_readiness()["detector"]},
+        crop=_plot_cfg().crop)
 
 
 def on_plot_mark(client, data):
@@ -838,46 +903,75 @@ def on_plot_config(client, data):
         if k in data:
             _plot[k] = cast(data[k])
     if "dry" in data:
-        _plot["dry"] = bool(data["dry"])
+        _run["dry"] = bool(data["dry"])
     if "land" in data:
         _plot["land"] = data["land"]
+        _run["mode"] = data["land"]     # same run, different trigger
     _emit_plot(preview=True)
+    _emit_run()
 
 
-def on_plot_start(client, data):
+# ── Shared run controls (both land types) ──────────────────────────────────
+def on_run_start(client, data):
+    """Start a run. Same entry point for both land types; only the trigger differs."""
     global _plot_thread
-    if not _PLOT_OK:
-        _plot["msg"] = "farmos planner unavailable"
-        return _emit_plot()
-    if _plot_thread and _plot_thread.is_alive():
+    if "dry" in data:
+        _run["dry"] = bool(data["dry"])
+    if "mode" in data:
+        _run["mode"] = data["mode"]
+    if _run["state"] in ("running", "paused"):
         return
     if len(_plot["corners"]) < 4:
-        _plot["msg"] = "mark all 4 corners first"
-        return _emit_plot()
-    _plot["state"] = "running"
-    _plot["msg"] = ""
-    _plot_thread = threading.Thread(target=_plot_loop, daemon=True)
-    _plot_thread.start()
-    _emit_plot()
+        _run["msg"] = "mark all 4 corners first"
+        return _emit_run()
+
+    _run.update(planted=0, total=0, msg="", positions=[])
+    if _run["mode"] == "drip":
+        if not (_VISION_OK and _cam["url"]):
+            _run["msg"] = "connect the camera first — the emitter model is the trigger"
+            return _emit_run()
+        # the camera loop does the driving; it watches _run["state"]
+        _run["state"] = "running"
+        log("drip run: arm positions %s (%d seeds/emitter), %s" % (
+            ", ".join("%d/%d" % (a, a + 180) for a in _drip["angles"]),
+            _drip_seeds_per_emitter(),
+            "DRY (no seeder)" if _run["dry"] else "seeder ARMED"))
+    else:
+        if not _PLOT_OK:
+            _run["msg"] = "farmos planner unavailable"
+            return _emit_run()
+        if _plot_thread and _plot_thread.is_alive():
+            return
+        _run["state"] = "running"
+        _plot_thread = threading.Thread(target=_plot_loop, daemon=True)
+        _plot_thread.start()
+    _emit_run()
 
 
-def on_plot_pause(client, data):
-    if _plot["state"] == "running":
-        _plot["state"] = "paused"
-    elif _plot["state"] == "paused":
-        _plot["state"] = "running"
-    _emit_plot()
+def on_run_pause(client, data):
+    """Plain land pauses between moves. Drip has no pause — stop it instead."""
+    if _run["mode"] == "drip":
+        return on_run_stop(client, data)
+    if _run["state"] == "running":
+        _run["state"] = "paused"
+    elif _run["state"] == "paused":
+        _run["state"] = "running"
+    _emit_run()
 
 
-def on_plot_stop(client, data):
-    if _plot["state"] in ("running", "paused"):
-        _plot["state"] = "stopped"       # the run thread's _gate() raises _Abort
-    _drive_stop("plot")
-    _emit_plot()
+def on_run_stop(client, data):
+    if _run["state"] in ("running", "paused"):
+        _run["state"] = "stopped"        # plain: _gate() raises _Abort; drip: loop exits
+        if _run["mode"] == "drip" and _run["positions"]:
+            _emit_report(_drip_runlog())
+        _run["msg"] = "stopped by operator"
+    _drive_stop("run")
+    _emit_run()
 
 
 def on_get_plot(client, data):
     _emit_plot(preview=True)
+    _emit_run()
 
 
 def on_get_diag(client, data):
@@ -926,8 +1020,6 @@ ui.on_message("survey_start",  logged("survey_start",  on_survey_start))
 ui.on_message("survey_stop",   logged("survey_stop",   on_survey_stop))
 ui.on_message("set_camera",    logged("set_camera",    on_set_camera))
 ui.on_message("drip_config",   logged("drip_config",   on_drip_config))
-ui.on_message("drip_start",    logged("drip_start",    on_drip_start))
-ui.on_message("drip_stop",     logged("drip_stop",     on_drip_stop))
 ui.on_message("capture_start", logged("capture_start", on_capture_start))
 ui.on_message("capture_stop",  logged("capture_stop",  on_capture_stop))
 ui.on_message("capture_clear", logged("capture_clear", on_capture_clear))
@@ -939,10 +1031,9 @@ ui.on_message("get_diag",      on_get_diag)    # polled only while Diag tab is o
 ui.on_message("plot_mark",     logged("plot_mark",   on_plot_mark))
 ui.on_message("plot_clear",    logged("plot_clear",  on_plot_clear))
 ui.on_message("plot_config",   logged("plot_config", on_plot_config))
-ui.on_message("plot_start",    logged("plot_start",  on_plot_start))
-ui.on_message("plot_pause",    logged("plot_pause",  on_plot_pause))
-ui.on_message("plot_stop",     logged("plot_stop",   on_plot_stop))
+ui.on_message("run_start",     logged("run_start",   on_run_start))
+ui.on_message("run_pause",     logged("run_pause",   on_run_pause))
+ui.on_message("run_stop",      logged("run_stop",    on_run_stop))
 ui.on_message("get_plot",      on_get_plot)
-ui.on_message("get_drip",      on_get_drip)
 
 App.run()
