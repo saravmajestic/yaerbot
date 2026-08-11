@@ -140,7 +140,9 @@
         <div class="card">
           <h2>Camera</h2>
           <div class="row">
-            <input type="text" id="cam-url" class="cam-input" value="10.100.166.144" placeholder="cam IP or farmcam.local">
+            <!-- mDNS name, not an IP: the cam's address changes with the network it
+                 joins (home WiFi vs the field hotspot), the name doesn't. -->
+            <input type="text" id="cam-url" class="cam-input" value="farmcam.local" placeholder="cam IP or farmcam.local">
             <button class="btn-wide net" id="cam-set">Connect</button>
           </div>
         </div>
@@ -192,6 +194,27 @@
       </div>
     </section>
 
+    <!-- DIAG -->
+    <section class="panel" id="panel-diag">
+      <div class="card">
+        <h2>Signal chain</h2>
+        <p class="dg-hint">Hold a direction and watch one command travel the whole way:
+          browser &rarr; console &rarr; MCU &rarr; driver pins &rarr; motor current.
+          A stage that goes red is where the chain breaks.</p>
+        <div class="dg-pad">
+          <button class="btn-dir dg-btn" data-dir="left">&#9664;</button>
+          <button class="btn-dir dg-btn" data-dir="forward">&#9650;</button>
+          <button class="btn-dir dg-btn" data-dir="backward">&#9660;</button>
+          <button class="btn-dir dg-btn" data-dir="right">&#9654;</button>
+        </div>
+      </div>
+      <ol class="dg-chain" id="dg-chain"></ol>
+      <details class="dg-raw">
+        <summary>raw getDiag</summary>
+        <pre id="dg-raw-json">—</pre>
+      </details>
+    </section>
+
     <!-- SETTINGS -->
     <section class="panel" id="panel-settings">
       <div class="card">
@@ -219,6 +242,7 @@
     <button class="tab" data-tab="soil">🧪 Soil</button>
     <button class="tab" data-tab="camera">📷 Cam</button>
     <button class="tab" data-tab="plan">🌾 Plan</button>
+    <button class="tab" data-tab="diag">🔍 Diag</button>
     <button class="tab" data-tab="settings">⚙ Settings</button>
   </nav>
 

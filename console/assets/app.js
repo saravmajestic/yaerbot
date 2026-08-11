@@ -42,6 +42,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     socket.emit('motor_stop', {});        // safety: leaving Drive stops the robot
     setDriveCam(name === 'drive');        // start/stop the Drive-tab direct stream
     if (name === 'soil')   socket.emit('get_soil', {});    // prime readings immediately
+    if (name === 'diag')   socket.emit('get_diag', {});
     if (name === 'camera') { socket.emit('get_vision', {}); socket.emit('get_capture', {}); }
   });
 });
@@ -237,6 +238,75 @@ socket.on('stats', (d) => {
   renderSeed(d.seed);
 });
 setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000);
+
+// ── Diag: trace one command browser → console → MCU → pins → motor current ──
+(function initDiag() {
+  const chainEl = document.getElementById('dg-chain');
+  const rawEl   = document.getElementById('dg-raw-json');
+  if (!chainEl) return;
+  const pair = (a, b) => `${a ?? '—'} / ${b ?? '—'}`;
+
+  socket.on('diag', d => {
+    const sent = d.ui || {};
+    const mcu  = d.mcu;
+    const cmd  = (mcu && mcu.cmd)  || {};
+    const pins = (mcu && mcu.pins) || {};
+    const amps = mcu && mcu.amps;             // absent unless CURRENT_SENSE is wired
+    const moving = !!(sent.left || sent.right);
+
+    // Stage 3+ can only be judged when the MCU answered at all.
+    const noDiag = !mcu;
+    const gotCmd = !noDiag && cmd.req_l === sent.left && cmd.req_r === sent.right;
+    // pins must reflect the applied duty, split by direction (forward on RPWM)
+    const pinsOk = !noDiag &&
+      pins.l_rpwm === Math.max(0, cmd.app_l) && pins.l_lpwm === Math.max(0, -cmd.app_l) &&
+      pins.r_rpwm === Math.max(0, cmd.app_r) && pins.r_lpwm === Math.max(0, -cmd.app_r);
+    // a side commanded but drawing no current = the drive never reached the motor
+    const dead = amps && ((cmd.app_l && amps.l_avg < 0.05) || (cmd.app_r && amps.r_avg < 0.05));
+
+    const stages = [
+      { n: 'Browser', v: sent.direction ? `${sent.direction} @ ${sent.speed ?? '—'}`
+                                        : 'no command yet',
+        s: sent.direction ? 'ok' : 'idle',
+        note: d.age_ms != null ? `${d.age_ms} ms ago` : '' },
+      { n: 'Console (after trim)', v: pair(sent.left, sent.right),
+        s: sent.direction ? 'ok' : 'idle',
+        note: d.trim ? `trim ${d.trim[0]} / ${d.trim[1]}` : '' },
+      { n: 'MCU received', v: noDiag ? '—' : pair(cmd.req_l, cmd.req_r),
+        s: noDiag ? 'na' : (gotCmd ? 'ok' : 'bad'),
+        note: noDiag ? 'no getDiag — flash the firmware'
+                     : (gotCmd ? `n=${cmd.n}, ${cmd.ms_ago} ms ago`
+                               : 'MISMATCH vs console — command did not arrive intact') },
+      { n: 'Driver pins (IBT-2)', v: noDiag ? '—'
+            : `L[${pins.l_rpwm},${pins.l_lpwm}] R[${pins.r_rpwm},${pins.r_lpwm}]`,
+        s: noDiag ? 'na' : (pinsOk ? 'ok' : 'bad'),
+        note: noDiag ? '' : (pinsOk ? 'RPWM/LPWM match the applied duty'
+                                    : 'pins disagree with the applied duty') },
+      { n: 'Motor current', v: amps ? `${amps.l_avg} A / ${amps.r_avg} A`
+                                    : 'not wired',
+        s: !amps ? 'na' : (dead ? 'bad' : (moving ? 'ok' : 'idle')),
+        note: !amps ? 'wire IBT-2 IS pins + set CURRENT_SENSE 1'
+                    : (dead ? 'COMMANDED BUT NO CURRENT — check IBT-2 wiring'
+                            : `peak ${amps.l_max} / ${amps.r_max} A over ${amps.n} samples`) },
+    ];
+
+    chainEl.innerHTML = stages.map(st => `
+      <li class="dg-stage ${st.s}">
+        <span class="dg-dot"></span>
+        <span class="dg-name">${st.n}</span>
+        <span class="dg-val">${st.v}</span>
+        <span class="dg-note">${st.note || ''}</span>
+      </li>`).join('');
+
+    rawEl.textContent = d.error ? `getDiag failed: ${d.error}`
+                                : JSON.stringify(mcu, null, 2) || '—';
+  });
+
+  // 400ms: fast enough to catch a button hold, light enough to leave running
+  setInterval(() => {
+    if (socket.connected && currentTab === 'diag') socket.emit('get_diag', {});
+  }, 400);
+})();
 
 // ── Network mode: ask the host helper (:7999) for the real mode ─────────────
 (function initNetMode() {

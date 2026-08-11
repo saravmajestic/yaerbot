@@ -85,8 +85,16 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 ### B2 — Path planning + spacing (Act 2)
 - [🟡] **Timed space-based seeding mode** exists in the Seed panel (gap × speed, single-spot) — *superseded by the path executor below*
 - [✅] **Boustrophedon planner** — `farmos/path.py`: plot dims + spacing → serpentine seed waypoints (computed, axis-aligned; unit-tested)
-- [🟡] **Timed dead-reckoning executor** — `farmos/executor.py`: drives the plan over a `RobotIO`, logs planned vs executed positions + stats. **`SimRobot` done & tested**; **`BridgeRobot` (real UNO Q) built but untested on hardware**
-- [⬜] Calibrate seconds-per-metre + turn rate on the actual plot at demo speed (feeds `BridgeRobot`)
+- [✅] **Timed dead-reckoning executor** — `farmos/executor.py` + `BridgeRobot`. **One seeding row verified on hardware 2026-08-11: three even 40 cm hops + a real 90° pivot.** The same run days earlier "rotated randomly within a 30 cm square". What it took:
+  - **Dead-time model on forward** (`startup_s + d/speed`) — a blind 40 cm hop was previously issued as a sub-dead-time burst that barely translated.
+  - **Coast model on turns** (negative offset) + a **separate, lower turn duty** — coast is ~75° at PWM 180 vs ~38° at PWM 120, so a 90° turn at full duty is mostly coast.
+  - **Three hardware faults fixed first**, none of them "the trim": loose IBT-2 signal jumpers (the *same* command drove 2.6 m straight, then a half-circle an hour later), one wheel not touching (a rigid 4-wheel frame rests on 3 of 4 points), and ~5% normal motor variance. Full writeup: **`ai-labs/apps/farm-robot/docs/farm-os/drive-precision.md`**.
+- [✅] **Decision: single stop-and-go flow for BOTH acts** — `stop → drive-a-hop → stop → plant → resume`, driven by a timer (Act 2) or the CV emitter event (Act 3). No continuous mode (punch + rotation-seeding need a dead stop).
+- [✅] **Calibration (2026-08-11, hard floor, 3S ~12 V)**: `ltrim=0.75`, `speed=0.616`, `startup=0.104`, `tpwm=120`, `tdps=51`, `tstartup=-0.75` → 40 cm hop = 0.75 s, 90° turn = 1.01 s. Recalibrate after **any** mechanical/wiring change (`field_test.py solve`/`tsolve`).
+- [✅] **Self-checking field tests** — `getDiag` on the MCU + `BridgeRobot._check_diag`: every move compares what we sent vs what the MCU latched and drove, and prints a `!!` banner on mismatch. Also a **Diag tab** in the console tracing browser → console → MCU → driver pins → motor current.
+- [🟡] **Turn precision is the remaining gap** — ±5–10° per turn from coast. The **row change (`A→B→B1→C`) doubles it**: both 90° turns go the same way, so 10°/turn leaves the next row 20° skew. Mitigations added: lower turn duty, optional **deceleration ramp** (`tramp`), and a **`uturn` calibration mode** that tunes the row change as one primitive (measure "are the legs parallel" + lateral gap). Validate on real ground.
+- [⬜] **MPU6050 gyro (~₹150)** — closed-loop heading. The only real fix for turn accuracy (measures the angle instead of predicting it) and it **removes the need for trim** entirely. Free `SDA`/`SCL` pins. Strongly reconsider before the final recording.
+- [⬜] **Wheel encoder** (LM393 slot sensor, ~₹100) — closed-loop *distance*. Note encoders do **not** fix heading in a skid-steer (wheels slip by design during a turn); that's the gyro's job.
 
 ### B3 — Vision / on-device model (Act 3)
 - [✅] Classical CV — `detect_tube` (Canny→Hough→steering) + `detect_emitter` (offline-tested 4/4, 3/3)

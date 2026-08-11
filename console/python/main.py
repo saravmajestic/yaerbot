@@ -1,7 +1,9 @@
 import base64
 import json
 import os
+import socket
 import sqlite3
+import struct
 import subprocess
 import threading
 import time
@@ -59,14 +61,21 @@ HELPER_TOKEN = "farmos-power"
 HELPER_PORT  = 7999
 
 def _host_gateway():
-    # the container's default gateway IS the UNO Q host
+    """The container's default gateway IS the UNO Q host.
+
+    Read /proc/net/route rather than shelling out: this image has no `ip`
+    binary, so the old `ip route` call always failed and silently fell through
+    to a hardcoded address that only happened to be right.
+    """
     try:
-        out = subprocess.check_output(
-            "ip route | awk '/default/{print $3; exit}'", shell=True
-        )
-        return out.decode().strip() or "172.19.0.1"
-    except Exception:
-        return "172.19.0.1"
+        with open("/proc/net/route") as f:
+            for line in f.read().splitlines()[1:]:
+                fields = line.split()
+                if fields[1] == "00000000":          # destination 0.0.0.0 = default
+                    return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    except Exception:                                 # noqa: BLE001
+        pass
+    return "172.19.0.1"
 
 def _helper_request(action):
     gw = _host_gateway()
@@ -93,6 +102,27 @@ RIGHT_TRIM = 1.00
 def trimmed(left, right):
     return int(left * LEFT_TRIM), int(right * RIGHT_TRIM)
 
+
+# ── Diagnostics: what THIS side last sent ──────────────────────────────────
+# The Diag tab traces one command end to end (browser → console → MCU → driver
+# pins → motor current). Stages 3-5 come from the MCU's getDiag; this records
+# stage 2, so a mismatch pins the break to a specific hop.
+_last_cmd = {"src": None, "direction": None, "left": None, "right": None,
+             "speed": None, "at": None}
+
+
+def _drive(left, right, src, direction=None):
+    """Every motor command goes through here so Diag always has the real value."""
+    _last_cmd.update(src=src, direction=direction, left=left, right=right,
+                     speed=_speed, at=time.time())
+    Bridge.call("setMotors", left, right)
+
+
+def _drive_stop(src):
+    _last_cmd.update(src=src, direction="stop", left=0, right=0,
+                     speed=_speed, at=time.time())
+    Bridge.call("stop")
+
 DIRECTIONS = {
     "forward":  lambda s: trimmed( s,  s),
     "backward": lambda s: trimmed(-s, -s),
@@ -106,11 +136,11 @@ def on_motor_cmd(client, data):
     fn = DIRECTIONS.get(direction)
     if fn:
         left, right = fn(_speed)
-        Bridge.call("setMotors", left, right)
+        _drive(left, right, "drive", direction)
 
 
 def on_motor_stop(client, data):
-    Bridge.call("stop")
+    _drive_stop("drive")
 
 
 def on_set_speed(client, data):
@@ -146,14 +176,14 @@ def _drive_gap():
     """Drive forward for gap_ms; abort only on STOP (state->idle). Returns False if stopped."""
     spd = _seed_cfg["drive_speed"]
     l, r = trimmed(spd, spd)
-    Bridge.call("setMotors", l, r)
+    _drive(l, r, "seed", "forward")
     end = time.time() + _seed_cfg["gap_ms"] / 1000.0
     while time.time() < end:
         if _seed["state"] == "idle":
-            Bridge.call("stop")
+            _drive_stop("seed")
             return False
         time.sleep(0.05)
-    Bridge.call("stop")
+    _drive_stop("seed")
     return True
 
 def _seed_loop():
@@ -353,16 +383,58 @@ def _moisture_min():
     except Exception:
         return None
 
+_mdns_cache = {}          # name -> (expires_at, ip)
+_MDNS_TTL = 60.0          # short: the cam's IP changes with the network it joins
+
+
+def _resolve_mdns(name):
+    """Resolve a *.local name to an IP, asking the host helper to do it.
+
+    This container's DNS is Docker's internal resolver, which has no mDNS, and
+    multicast doesn't cross the bridge to wlan0 — so `farmcam.local` is
+    unresolvable in here. The host runs avahi and can resolve it, so we ask it.
+    Returns the name unchanged if that fails, leaving the error to the caller.
+    """
+    now = time.time()
+    hit = _mdns_cache.get(name)
+    if hit and hit[0] > now:
+        return hit[1]
+    url = "http://%s:%d/resolve?name=%s" % (_host_gateway(), HELPER_PORT, name)
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            ip = json.loads(r.read()).get("ip")
+        if ip:
+            _mdns_cache[name] = (now + _MDNS_TTL, ip)
+            log("resolved %s -> %s (via host)" % (name, ip))
+            return ip
+        log("resolve %s: helper returned no ip" % name)
+    except Exception as e:                    # noqa: BLE001
+        log("resolve %s failed: %s" % (name, e))
+    return name
+
+
+def _host(hostport):
+    """Swap a bare *.local host for its IP, preserving any :port suffix."""
+    host, _, port = hostport.partition(":")
+    if host.endswith(".local"):
+        host = _resolve_mdns(host)
+    return host + (":" + port if port else "")
+
+
 def _stream_url(base):
-    """Accept 'ip', 'http://ip', or a full URL -> the MJPEG stream URL."""
+    """Accept 'ip', 'host.local', 'http://…', or a full URL -> MJPEG stream URL."""
     b = base.strip()
     if not b:
         return ""
-    if b.startswith("http") and "/stream" in b:
-        return b
     if b.startswith("http"):
-        return b.rstrip("/") + ":81/stream"
-    return "http://%s:81/stream" % b
+        rest = b.split("://", 1)[1]
+        hostport, slash, tail = rest.partition("/")
+        b = "http://" + _host(hostport) + slash + tail
+        return b if "/stream" in b else b.rstrip("/") + ":81/stream"
+    hostport = _host(b)                       # bare 'ip' / 'host.local' / either with :port
+    if ":" not in hostport:
+        hostport += ":81"                     # the ESP32-CAM's stream port
+    return "http://%s/stream" % hostport
 
 def _cam_loop(url):
     last_plant = 0.0
@@ -587,6 +659,27 @@ def _battery():
     _batt_ema["pct"] = pct if _batt_ema["pct"] is None else (1 - a) * _batt_ema["pct"] + a * pct
     return int(round(_batt_ema["pct"])), round(_batt_ema["v"], 2)
 
+def on_get_diag(client, data):
+    """One end-to-end trace for the Diag tab: our last command + the MCU's view.
+
+    `mcu` is None on firmware without getDiag; `amps` is absent unless the IBT-2
+    IS pins are wired and CURRENT_SENSE is enabled in the sketch.
+    """
+    mcu, err = None, None
+    try:
+        mcu = json.loads(_decode(Bridge.call("getDiag")))
+    except Exception as e:                       # noqa: BLE001
+        err = str(e)
+    sent = dict(_last_cmd)
+    ui.send_message("diag", {
+        "ui":     sent,
+        "age_ms": int((time.time() - sent["at"]) * 1000) if sent["at"] else None,
+        "mcu":    mcu,
+        "error":  err,
+        "trim":   [LEFT_TRIM, RIGHT_TRIM],
+    })
+
+
 def on_get_stats(client, data):
     batt_pct, batt_v = _battery()
     ui.send_message("stats", {
@@ -624,5 +717,6 @@ ui.on_message("get_capture",   on_get_capture)
 ui.on_message("get_soil",      on_get_soil)    # polled only while Soil tab is open
 ui.on_message("get_vision",    on_get_vision)  # polled only while Camera tab is open
 ui.on_message("get_stats",     on_get_stats)   # polled by the UI; unlogged (noisy)
+ui.on_message("get_diag",      on_get_diag)    # polled only while Diag tab is open
 
 App.run()
