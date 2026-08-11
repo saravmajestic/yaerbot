@@ -56,23 +56,83 @@
       <div class="seed-wrap">
 
         <div class="card">
-          <h2>Mode</h2>
-          <div class="seg" id="seg-trigger">
-            <button class="seg-btn active" data-v="space">Space-based</button>
-            <button class="seg-btn" data-v="drip" disabled>Drip-based · soon</button>
+          <h2>Land</h2>
+          <div class="seg" id="seg-land">
+            <button class="seg-btn active" data-v="plain">🟫 Plain land</button>
+            <button class="seg-btn" data-v="drip" disabled>💧 Drip-irrigated · soon</button>
           </div>
-          <div class="seg" id="seg-arm">
-            <button class="seg-btn active" data-v="fixed">Fixed arm · 2 rows</button>
-            <button class="seg-btn" data-v="rotating" disabled>Rotating · soon</button>
+          <p class="hint">Plain land seeds on a fixed grid. Drip land plants at each
+            emitter the camera finds — no spacing needed there.</p>
+        </div>
+
+        <div class="card">
+          <h2>Mark the plot</h2>
+          <p class="hint">Walk the boundary and mark each corner in order.
+            <b>1 = where the robot starts</b> · <b>2 = far end of the first row</b>
+            (it drives 1→2 straight, then snakes across to 3 and 4).</p>
+          <div class="pt-marks" id="pt-marks">
+            <button class="pt-mark" data-c="1">Mark 1</button>
+            <button class="pt-mark" data-c="2">Mark 2</button>
+            <button class="pt-mark" data-c="3">Mark 3</button>
+            <button class="pt-mark" data-c="4">Mark 4</button>
+          </div>
+          <div class="row">
+            <div class="field pt-dim">
+              <label>Row length 1→2 (m)</label>
+              <input type="number" id="pt-l" min="0.5" max="50" step="0.5" value="5">
+            </div>
+            <div class="field pt-dim">
+              <label>Width across rows (m)</label>
+              <input type="number" id="pt-w" min="0.5" max="50" step="0.5" value="5">
+            </div>
+          </div>
+          <button class="btn-wide" id="pt-clear">Clear marks</button>
+        </div>
+
+        <div class="card">
+          <h2>Spacing</h2>
+          <div class="row">
+            <div class="field pt-dim">
+              <label>Row spacing (cm)</label>
+              <input type="number" id="pt-rowgap" min="10" max="200" step="5" value="40">
+            </div>
+            <div class="field pt-dim">
+              <label>Seed spacing (cm)</label>
+              <input type="number" id="pt-seedgap" min="10" max="200" step="5" value="40">
+            </div>
+          </div>
+          <div class="field">
+            <label>Seeds per spot <span id="pt-spot-val">1</span></label>
+            <input type="range" id="pt-spot" min="1" max="5" step="1" value="1">
           </div>
         </div>
 
         <div class="card">
-          <h2>Parameters</h2>
+          <h2>Plan</h2>
+          <div class="pt-plot" id="pt-plot">
+            <svg id="pt-svg" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid meet"></svg>
+          </div>
+          <div class="pt-stats" id="pt-stats">—</div>
+        </div>
+
+        <div class="card">
+          <div class="seed-status" id="seed-status">Idle</div>
+          <label class="pt-dry"><input type="checkbox" id="pt-dry" checked>
+            Dry run — drive the path, don't fire the seeder</label>
+          <div class="row seed-run">
+            <button class="btn-wide start"  id="pt-start">▶ Start</button>
+            <button class="btn-wide pause"  id="pt-pause">⏸ Pause</button>
+            <button class="btn-wide sstop"  id="pt-stop">■ Stop</button>
+          </div>
+          <button class="btn-wide plant1" id="seed-plant1">🌱 Plant once (test)</button>
+        </div>
+
+        <details class="pt-legacy">
+          <summary>Legacy timed mode (single row, seconds-based)</summary>
           <div class="field">
             <label>Gap between plants <span id="seed-gap-val">2.0</span> s</label>
             <input type="range" id="seed-gap" min="0.5" max="8" step="0.5" value="2">
-            <p class="hint">Timed drive — actual spacing ≈ gap × speed (calibrate on flat ground).</p>
+            <p class="hint">Timed drive — superseded by the plot plan above.</p>
           </div>
           <div class="field">
             <label>Seeds per spot <span id="seed-spot-val">1</span></label>
@@ -82,16 +142,16 @@
             <label>Drive speed <span id="seed-speed-val">60</span>%</label>
             <input type="range" id="seed-speed" min="20" max="100" step="5" value="60">
           </div>
-        </div>
-
-        <div class="card">
-          <div class="seed-status" id="seed-status">Idle</div>
           <div class="row seed-run">
-            <button class="btn-wide start"  id="seed-start">▶ Start</button>
-            <button class="btn-wide pause"  id="seed-pause">⏸ Pause</button>
-            <button class="btn-wide sstop"  id="seed-stop">■ Stop</button>
+            <button class="btn-wide start" id="seed-start">▶ Start</button>
+            <button class="btn-wide pause" id="seed-pause">⏸ Pause</button>
+            <button class="btn-wide sstop" id="seed-stop">■ Stop</button>
           </div>
-          <button class="btn-wide plant1" id="seed-plant1">🌱 Plant once (test)</button>
+        </details>
+
+        <div class="card pt-report" id="pt-report" hidden>
+          <h2>Field report</h2>
+          <div id="pt-report-svg"></div>
         </div>
 
       </div>

@@ -344,3 +344,36 @@ input[type=range]::-webkit-slider-thumb {
 .dg-raw summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 .dg-raw pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 10px; font-size: 11px; overflow-x: auto; margin-top: 8px; }
+
+/* ── Seed tab: plot marking + serpentine plan ─────────────────────────────── */
+.pt-marks { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+.pt-mark { padding: 12px 0; font-size: 13px; font-weight: 600; border-radius: 8px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); }
+.pt-mark.marked { background: #0f2417; color: var(--good); border-color: #238636; }
+.pt-mark.marked::after { content: ' ✓'; }
+.pt-dim { flex: 1; }
+.pt-dim input { width: 100%; padding: 9px 10px; font-size: 15px; border-radius: 8px;
+  background: var(--bg); color: var(--ink); border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums; }
+
+/* Square so the plan's aspect ratio reads true — it's a map, not a chart. */
+.pt-plot { background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  aspect-ratio: 1 / 1; max-height: 46vh; margin: 0 auto; }
+.pt-plot svg { width: 100%; height: 100%; display: block; }
+.pt-field { fill: #10151c; stroke: var(--border); stroke-width: .6; }
+.pt-path { fill: none; stroke: var(--accent); stroke-width: .5; opacity: .55; }
+.pt-todo { fill: var(--muted); opacity: .55; }
+.pt-done { fill: var(--good); }
+.pt-corner { fill: none; stroke: var(--warn); stroke-width: .8; }
+.pt-cnum { fill: var(--warn); font-size: 3.4px; text-anchor: middle; font-weight: 700; }
+
+.pt-stats { margin-top: 10px; font-size: 12px; color: var(--muted); line-height: 1.6;
+  font-variant-numeric: tabular-nums; }
+.pt-stats b { color: var(--ink); }
+.pt-live { color: var(--good); font-weight: 700; }
+
+.pt-dry { display: flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--muted); margin: 10px 0; }
+.pt-legacy { margin-top: 4px; }
+.pt-legacy summary { font-size: 12px; color: var(--muted); cursor: pointer; padding: 6px 0; }
+.pt-report svg { width: 100%; height: auto; }

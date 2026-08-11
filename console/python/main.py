@@ -39,6 +39,18 @@ try:
 except Exception as _e:                      # noqa: BLE001
     print("vision unavailable (raw feed only): %s" % _e, flush=True)
 
+# Act 2/4 planner + executor + report. Guarded the same way as vision so a missing
+# farmos/ can't stop the console from starting.
+_PLOT_OK = False
+try:
+    from farmos import SeedPlan, plan_boustrophedon, execute
+    from farmos.path import plan_summary
+    from farmos.report import render_svg
+    from farmos.robot_io import BridgeRobot
+    _PLOT_OK = True
+except Exception as _e:                      # noqa: BLE001
+    print("farmos planner unavailable (Seed tab plot mode off): %s" % _e, flush=True)
+
 ui = WebUI()
 
 
@@ -659,6 +671,198 @@ def _battery():
     _batt_ema["pct"] = pct if _batt_ema["pct"] is None else (1 - a) * _batt_ema["pct"] + a * pct
     return int(round(_batt_ema["pct"])), round(_batt_ema["v"], 2)
 
+# ── Plot seeding (Act 2): mark a plot, plan a serpentine, drive it ──────────
+# Calibration measured 2026-08-11 (hard floor, 3S ~12V). These are surface- and
+# hardware-specific — recalibrate after ANY mechanical/wiring change with
+# scripts/field_test.py (solve/tsolve). See docs/farm-os/drive-precision.md.
+# batt_comp stays off: the A4 divider still reads low and wanders.
+CAL = {
+    "pwm": 180, "speed": 0.616, "startup": 0.104,
+    "ltrim": 0.75, "rtrim": 1.00,
+    "turn_pwm": 120, "tdps": 51.0, "tstartup": -0.75, "tramp": 0.0,
+}
+
+# The 4 corner marks are a MOCK: the operator walks the plot and taps each corner,
+# which is the demo gesture for "this is the land". There is no absolute position
+# sensor (no GPS, no encoders), so the marks are presentational — the geometry the
+# robot actually drives comes from the entered width/length. Corner 1 is where the
+# robot starts, heading along the first edge.
+_plot = {
+    "land": "plain",
+    "corners": [], "w": 5.0, "l": 5.0,
+    "row_gap": 0.40, "seed_gap": 0.40, "seeds_per_spot": 1, "dry": True,
+    "state": "idle",            # idle | running | paused | done | stopped | error
+    "spot": 0, "total": 0, "msg": "",
+}
+_plot_thread = None
+
+
+class _Abort(Exception):
+    """Raised inside the run thread when the operator stops the run."""
+
+
+def _plot_cfg():
+    return SeedPlan(plot_w_m=_plot["w"], plot_l_m=_plot["l"],
+                    row_gap_m=_plot["row_gap"], seed_gap_m=_plot["seed_gap"],
+                    seeds_per_spot=int(_plot["seeds_per_spot"]),
+                    speed_mps=CAL["speed"], crop="groundnut")
+
+
+def _plot_preview():
+    """Planned spots + summary for the UI overlay (no driving)."""
+    if not _PLOT_OK:
+        return {"planned": [], "summary": {}, "est_s": 0}
+    cfg = _plot_cfg()
+    path = plan_boustrophedon(cfg)
+    summary = plan_summary(cfg)
+    # rough time: each hop is startup + gap/speed, plus ~1.3s per plant (punch+drop)
+    hop = CAL["startup"] + _plot["seed_gap"] / CAL["speed"]
+    plant_s = 0.0 if _plot["dry"] else 1.3 * int(_plot["seeds_per_spot"])
+    turns = max(0, summary.get("rows", 0) - 1) * 2
+    est = len(path) * (hop + plant_s) + turns * (CAL["tstartup"] + 90 / CAL["tdps"])
+    return {"planned": [[w.x, w.y] for w in path], "summary": summary,
+            "est_s": int(max(0, est))}
+
+
+def _emit_plot(preview=False):
+    msg = {k: _plot[k] for k in
+           ("land", "corners", "w", "l", "row_gap", "seed_gap", "seeds_per_spot",
+            "dry", "state", "spot", "total", "msg")}
+    if preview:
+        msg.update(_plot_preview())
+    ui.send_message("plot", msg)
+
+
+class _ProgressRobot(BridgeRobot):
+    """BridgeRobot that reports progress and can be stopped mid-run.
+
+    execute() only talks to the robot, so overriding its methods is the hook for
+    both progress and abort — no changes needed in farmos/executor.py.
+    """
+
+    def _gate(self):
+        while _plot["state"] == "paused":
+            time.sleep(0.2)
+        if _plot["state"] != "running":
+            raise _Abort()
+
+    def forward(self, distance_m):
+        self._gate()
+        super().forward(distance_m)
+
+    def turn_to(self, heading_deg):
+        self._gate()
+        super().turn_to(heading_deg)
+
+    def plant(self):
+        self._gate()
+        super().plant()
+        _plot["spot"] += 1
+        _emit_plot()
+
+
+def _plot_loop():
+    cfg = _plot_cfg()
+    path = plan_boustrophedon(cfg)
+    _plot["total"] = len(path) * int(_plot["seeds_per_spot"])
+    _plot["spot"] = 0
+    robot = _ProgressRobot(
+        speed_mps=CAL["speed"], startup_s=CAL["startup"], pwm=int(CAL["pwm"]),
+        left_trim=CAL["ltrim"], right_trim=CAL["rtrim"],
+        turn_pwm=int(CAL["turn_pwm"]), turn_deg_per_s=CAL["tdps"],
+        turn_startup_s=CAL["tstartup"], turn_ramp_s=CAL["tramp"],
+        plant_enabled=not _plot["dry"], batt_comp=False)
+    log("plot run: %d spots, %s" % (len(path), "DRY (no seeder)" if _plot["dry"]
+                                    else "seeder ARMED"))
+    _emit_plot()
+    try:
+        runlog = execute(cfg, path, robot)
+        _plot["state"] = "done"
+        _plot["msg"] = "finished — %d spots" % len(runlog.executed)
+        ui.send_message("plot_report", {"svg": render_svg(runlog),
+                                        "stats": runlog.stats})
+    except _Abort:
+        _plot["msg"] = "stopped by operator"
+    except Exception as e:                       # noqa: BLE001
+        _plot["state"] = "error"
+        _plot["msg"] = str(e)
+        log("plot run FAILED: %s" % e)
+    finally:
+        try:
+            _drive_stop("plot")
+        except Exception:                        # noqa: BLE001
+            pass
+        if robot.warnings:                       # MCU disagreed with what we sent
+            _plot["msg"] += " · %d diag warning(s)" % len(robot.warnings)
+            for w in robot.warnings:
+                log("plot diag: %s" % w)
+        _emit_plot()
+
+
+def on_plot_mark(client, data):
+    """Mock corner mark — the operator walks the plot and taps each corner."""
+    if len(_plot["corners"]) < 4:
+        _plot["corners"].append(int(data.get("corner", len(_plot["corners"]) + 1)))
+    _plot["msg"] = ("plot marked — corner 1 is the start"
+                    if len(_plot["corners"]) == 4 else
+                    "marked %d of 4 corners" % len(_plot["corners"]))
+    _emit_plot(preview=True)
+
+
+def on_plot_clear(client, data):
+    _plot["corners"] = []
+    _plot["msg"] = ""
+    _emit_plot(preview=True)
+
+
+def on_plot_config(client, data):
+    for k, cast in (("w", float), ("l", float), ("row_gap", float),
+                    ("seed_gap", float), ("seeds_per_spot", int)):
+        if k in data:
+            _plot[k] = cast(data[k])
+    if "dry" in data:
+        _plot["dry"] = bool(data["dry"])
+    if "land" in data:
+        _plot["land"] = data["land"]
+    _emit_plot(preview=True)
+
+
+def on_plot_start(client, data):
+    global _plot_thread
+    if not _PLOT_OK:
+        _plot["msg"] = "farmos planner unavailable"
+        return _emit_plot()
+    if _plot_thread and _plot_thread.is_alive():
+        return
+    if len(_plot["corners"]) < 4:
+        _plot["msg"] = "mark all 4 corners first"
+        return _emit_plot()
+    _plot["state"] = "running"
+    _plot["msg"] = ""
+    _plot_thread = threading.Thread(target=_plot_loop, daemon=True)
+    _plot_thread.start()
+    _emit_plot()
+
+
+def on_plot_pause(client, data):
+    if _plot["state"] == "running":
+        _plot["state"] = "paused"
+    elif _plot["state"] == "paused":
+        _plot["state"] = "running"
+    _emit_plot()
+
+
+def on_plot_stop(client, data):
+    if _plot["state"] in ("running", "paused"):
+        _plot["state"] = "stopped"       # the run thread's _gate() raises _Abort
+    _drive_stop("plot")
+    _emit_plot()
+
+
+def on_get_plot(client, data):
+    _emit_plot(preview=True)
+
+
 def on_get_diag(client, data):
     """One end-to-end trace for the Diag tab: our last command + the MCU's view.
 
@@ -718,5 +922,12 @@ ui.on_message("get_soil",      on_get_soil)    # polled only while Soil tab is o
 ui.on_message("get_vision",    on_get_vision)  # polled only while Camera tab is open
 ui.on_message("get_stats",     on_get_stats)   # polled by the UI; unlogged (noisy)
 ui.on_message("get_diag",      on_get_diag)    # polled only while Diag tab is open
+ui.on_message("plot_mark",     logged("plot_mark",   on_plot_mark))
+ui.on_message("plot_clear",    logged("plot_clear",  on_plot_clear))
+ui.on_message("plot_config",   logged("plot_config", on_plot_config))
+ui.on_message("plot_start",    logged("plot_start",  on_plot_start))
+ui.on_message("plot_pause",    logged("plot_pause",  on_plot_pause))
+ui.on_message("plot_stop",     logged("plot_stop",   on_plot_stop))
+ui.on_message("get_plot",      on_get_plot)
 
 App.run()

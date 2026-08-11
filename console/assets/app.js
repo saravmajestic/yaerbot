@@ -43,6 +43,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     setDriveCam(name === 'drive');        // start/stop the Drive-tab direct stream
     if (name === 'soil')   socket.emit('get_soil', {});    // prime readings immediately
     if (name === 'diag')   socket.emit('get_diag', {});
+    if (name === 'seed')   socket.emit('get_plot', {});
     if (name === 'camera') { socket.emit('get_vision', {}); socket.emit('get_capture', {}); }
   });
 });
@@ -238,6 +239,99 @@ socket.on('stats', (d) => {
   renderSeed(d.seed);
 });
 setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000);
+
+// ── Plot seeding (Act 2): mark the plot, preview the serpentine, run it ─────
+(function initPlot() {
+  const svg   = document.getElementById('pt-svg');
+  const stats = document.getElementById('pt-stats');
+  const marks = document.getElementById('pt-marks');
+  if (!svg) return;
+
+  const cfgEls = { w: 'pt-w', l: 'pt-l', row_gap: 'pt-rowgap',
+                   seed_gap: 'pt-seedgap', seeds_per_spot: 'pt-spot' };
+  const sendCfg = () => socket.emit('plot_config', {
+    w: +document.getElementById('pt-w').value,
+    l: +document.getElementById('pt-l').value,
+    row_gap: +document.getElementById('pt-rowgap').value / 100,   // cm in UI, m on the wire
+    seed_gap: +document.getElementById('pt-seedgap').value / 100,
+    seeds_per_spot: +document.getElementById('pt-spot').value,
+    dry: document.getElementById('pt-dry').checked,
+  });
+  Object.values(cfgEls).forEach(id =>
+    document.getElementById(id).addEventListener('change', sendCfg));
+  document.getElementById('pt-spot').addEventListener('input', () => {
+    document.getElementById('pt-spot-val').textContent = document.getElementById('pt-spot').value;
+  });
+  document.getElementById('pt-dry').addEventListener('change', sendCfg);
+
+  marks.querySelectorAll('.pt-mark').forEach(b =>
+    b.addEventListener('click', () => socket.emit('plot_mark', { corner: +b.dataset.c })));
+  document.getElementById('pt-clear').addEventListener('click',
+    () => socket.emit('plot_clear', {}));
+  document.getElementById('pt-start').addEventListener('click', () => {
+    const dry = document.getElementById('pt-dry').checked;
+    // it drives itself across the plot — make that explicit, and louder if armed
+    if (!confirm(dry ? 'Start the dry run?\n\nThe robot will drive the whole plot. Keep the area clear.'
+                     : '⚠ SEEDER ARMED\n\nThe robot will drive the whole plot and plant at every spot. Continue?')) return;
+    socket.emit('plot_start', {});
+  });
+  document.getElementById('pt-pause').addEventListener('click', () => socket.emit('plot_pause', {}));
+  document.getElementById('pt-stop').addEventListener('click',  () => socket.emit('plot_stop', {}));
+
+  const mmss = s => `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+
+  function draw(d) {
+    const w = d.w || 5, l = d.l || 5, pad = 6;
+    // plot x = across rows, y = along rows; SVG y is inverted so row 1 reads at the bottom
+    const sx = v => pad + (v / w) * (100 - 2 * pad);
+    const sy = v => 100 - pad - (v / l) * (100 - 2 * pad);
+    const pts = d.planned || [];
+    const done = d.spot || 0, per = Math.max(1, d.seeds_per_spot || 1);
+    const doneSpots = Math.floor(done / per);
+
+    const path = pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(2)},${sy(p[1]).toFixed(2)}`).join(' ');
+    const dots = pts.map((p, i) =>
+      `<circle cx="${sx(p[0]).toFixed(2)}" cy="${sy(p[1]).toFixed(2)}" r="${i < doneSpots ? 1.5 : 1}"
+        class="${i < doneSpots ? 'pt-done' : 'pt-todo'}"/>`).join('');
+    const corners = (d.corners || []).length;
+    // Walk order matches the drive: 1 = start, 2 = far end of the FIRST row, then
+    // across to 3 and back to 4. So "1 -> 2" is the first straight run.
+    const cmark = [[0, 0], [0, l], [w, l], [w, 0]].slice(0, corners).map(([x, y], i) =>
+      `<circle cx="${sx(x).toFixed(2)}" cy="${sy(y).toFixed(2)}" r="2.6" class="pt-corner"/>
+       <text x="${sx(x).toFixed(2)}" y="${(sy(y) + 1.2).toFixed(2)}" class="pt-cnum">${i + 1}</text>`).join('');
+
+    svg.innerHTML = `
+      <rect x="${pad}" y="${pad}" width="${100 - 2 * pad}" height="${100 - 2 * pad}" class="pt-field"/>
+      ${pts.length ? `<path d="${path}" class="pt-path"/>` : ''}
+      ${dots}${cmark}`;
+
+    const s = d.summary || {};
+    if (!pts.length) { stats.textContent = 'Set the plot size and spacing to see the plan.'; return; }
+    stats.innerHTML =
+      `<b>${s.rows || 0}</b> rows × <b>${s.seeds_per_row || 0}</b> spots ` +
+      `= <b>${pts.length}</b> spots · <b>${pts.length * per}</b> seeds · ` +
+      `~<b>${mmss(d.est_s || 0)}</b> · ${corners}/4 corners marked` +
+      (d.state === 'running' || d.state === 'paused'
+        ? ` · <span class="pt-live">spot ${done}/${d.total}</span>` : '');
+  }
+
+  socket.on('plot', d => {
+    draw(d);
+    const st = document.getElementById('seed-status');
+    const label = { idle: 'Idle', running: 'Running', paused: 'Paused',
+                    done: 'Done', stopped: 'Stopped', error: 'Error' }[d.state] || d.state;
+    st.textContent = label + (d.msg ? ' — ' + d.msg : '');
+    st.className = 'seed-status ' + (d.state === 'running' ? 'running' : '');
+    marks.querySelectorAll('.pt-mark').forEach((b, i) =>
+      b.classList.toggle('marked', i < (d.corners || []).length));
+  });
+
+  socket.on('plot_report', d => {
+    const box = document.getElementById('pt-report');
+    document.getElementById('pt-report-svg').innerHTML = d.svg || '';
+    box.hidden = !d.svg;
+  });
+})();
 
 // ── Diag: trace one command browser → console → MCU → pins → motor current ──
 (function initDiag() {
