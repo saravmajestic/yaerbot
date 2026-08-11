@@ -83,7 +83,13 @@ body {
 
 /* ── Panels ── */
 .main { flex: 1; position: relative; overflow-y: auto; }
-.panel { display: none; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 34px; padding: 24px 18px; }
+/* min-height, NOT height: with a fixed height + justify-content:center, a panel
+   taller than the viewport overflows in BOTH directions and its top becomes
+   unreachable — you can't scroll up to it. min-height lets tall panels (Seed,
+   Diag) grow so .main scrolls them normally, while short ones still centre. */
+.panel { display: none; min-height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 34px; padding: 24px 18px; }
+/* the Plan tab is a chat column that must fill the viewport exactly, not grow */
+#panel-plan { height: 100%; }
 .panel.active { display: flex; }
 
 /* ── Drive ── */
