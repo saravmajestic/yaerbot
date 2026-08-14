@@ -26,3 +26,6 @@ secrets.*
 commands.txt
 examples/full_report.svg
 farmos/planner/data/weather_cache.json
+
+# Runtime logs written by the console on the board
+console/battery.csv

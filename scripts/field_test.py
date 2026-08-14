@@ -5,6 +5,9 @@
 
 Calibration (do this first, on the pack you'll run on):
   batt                        pack voltage — write it down, it's v_cal for the runs below
+  battlog [n]                 summarise the console's continuous A4/battery log
+                              (last n samples). Judge the sensor on the IDLE spread —
+                              sag while driving is real. Log: ~motor-control/battery.csv
   diag                        MCU snapshot: commands received, duty written to the IBT-2
                               pins, raw battery ADC, and per-move motor current if the
                               firmware has CURRENT_SENSE wired. Text log: arduino-app-cli monitor
@@ -19,6 +22,17 @@ Runs (key=value args, any order):
   row   drive one row as stop-and-go hops, then a row-end turn
         total=1.2 hop=0.4 turn=90 dir=right speed=<m/s> tdps=<deg/s>
         [pwm=180] [startup=<s>] [tstartup=<s>] [ltrim=] [v=<v_cal>] [nobatt] [plant]
+  spool S3003 arm calibration — SEEDER ONLY, never touches the drive motors:
+        spool sweep [from=0] [to=180] [step=15] [dwell=3]   step + hold, you measure
+        spool go <deg>                                      park at one commanded angle
+        spool solve <cmd1> <phys1> <cmd2> <phys2>           -> SPOOL_A / SPOOL_B
+  cycle FULL ACTUATOR LOOP x n — the one that exercises everything end to end:
+        hop -> stop -> 4-seed cross (spool 0/180 then 90/270, solenoid each time)
+        -> body turn -> repeat.
+        n=3 hop=0.4 turn=90 dir=right angles=0,90 dwell=0.6 speed= tdps=
+        [pwm=180] [startup=] [tstartup=] [tpwm=] [ltrim=] [v=] [nobatt] [plant]
+        WITHOUT `plant` the spool + turns still run but the solenoid never fires —
+        do that first, on the bench, with the hopper empty.
   uturn the ROW CHANGE as one primitive: leg -> 90 -> gap -> 90 -> leg.
         leg=1.0 gap=0.4 turn=90 dir=right + the same robot params.
         Measure whether the two legs are PARALLEL and how far apart — both turns go
@@ -233,6 +247,154 @@ def main() -> None:
         report_warnings(robot, "/app/python/field_diag.json")
         print(f"MEASURE: distance travelled (expect {hops * hop:.2f}m) and the turn "
               f"(expect {turn_deg:.0f}deg)")
+
+    elif m == "spool":
+        # S3003 arm calibration. DELIBERATELY MOTOR-FREE: this mode only ever calls
+        # indexSpool, so the robot cannot drive off while you are holding a protractor
+        # against the arm. Bench or ground, doesn't matter — nothing rolls.
+        #
+        # Why this is needed: indexSpool passes the angle straight to Servo::write(),
+        # but an S3003 does not sweep a true 180 deg over a 500-2500us pulse.
+        # firmware/s3003_cycle.ino:35 says write(90) reached only ~60 deg of travel,
+        # yet the same sketch dialled in goTo(80) for a physical quarter turn — those
+        # two notes contradict each other and nobody has measured it since the RPC
+        # replaced that sketch. It matters because the drip cross plants at arm 0 and
+        # 90: if commanded != physical, the "4-seed cross" is a skewed X.
+        #
+        # Mark the arm (tape flag on one outlet) and measure against a fixed reference.
+        # Measure the SAME outlet every time — the other one reads 180 deg away.
+        sub = args[0] if args else "sweep"
+        B = bridge()
+
+        if sub == "go":
+            deg = int(float(args[1]))
+            B.call("indexSpool", deg)
+            print(f"spool commanded {deg} deg — measure the PHYSICAL arm angle now")
+
+        elif sub == "solve":
+            # Fit commanded = A*physical + B from two (commanded, physical) pairs.
+            c1, p1, c2, p2 = (float(v) for v in args[1:5])
+            if p1 == p2:
+                sys.exit("the two physical angles must differ")
+            a = (c2 - c1) / (p2 - p1)
+            b = c1 - a * p1
+            print(f"measured: cmd {c1:g} -> phys {p1:g} deg,  cmd {c2:g} -> phys {p2:g} deg")
+            print(f"  travel ratio: {1 / a:.3f} deg physical per deg commanded")
+            print(f"  to get PHYSICAL p, command:  {a:.4f} * p + {b:.2f}")
+            print(f"\nfirmware (farm_os.ino):")
+            print(f"  const float SPOOL_A = {a:.4f}f;")
+            print(f"  const float SPOOL_B = {b:.2f}f;")
+            # what the drip cross actually needs, and whether the servo can reach it
+            lo, hi = (0 - b) / a, (180 - b) / a
+            lo, hi = min(lo, hi), max(lo, hi)
+            print(f"\nreachable physical range: {lo:.0f}..{hi:.0f} deg")
+            for want in (0, 45, 90):
+                cmd = a * want + b
+                ok = "" if 0 <= cmd <= 180 else "   <-- OUT OF RANGE, unreachable"
+                print(f"  physical {want:3d} deg  ->  command {cmd:6.1f}{ok}")
+            if hi < 90:
+                print("\n  !! the arm cannot reach a physical 90 deg — the 4-seed cross")
+                print("     cannot be a true cross with this servo/linkage as geared.")
+
+        else:  # sweep
+            opts = kv(args[1:], step="15", dwell="3")
+            lo = float(opts.get("from", 0)); hi = float(opts.get("to", 180))
+            step, dwell = float(opts["step"]), float(opts["dwell"])
+            n = int(abs(hi - lo) / step) + 1
+            print(f"spool sweep {lo:g}..{hi:g} step {step:g}, holding {dwell:g}s each "
+                  f"({n} positions, ~{n * dwell:.0f}s)")
+            print("MOTORS ARE NOT TOUCHED. Mark one outlet and read each position.\n")
+            print("  commanded   physical (write it down)")
+            for i in range(n):
+                d = int(round(lo + i * step * (1 if hi >= lo else -1)))
+                B.call("indexSpool", d)
+                print(f"  {d:9d}   ______")
+                time.sleep(dwell)
+            B.call("indexSpool", 0)
+            print("\nparked at 0. Now feed the two most accurate readings to:")
+            print("  field_test.py spool solve <cmd1> <phys1> <cmd2> <phys2>")
+            print("Pick two WIDELY SEPARATED points (e.g. 0 and 180) — a short baseline")
+            print("multiplies your reading error into the fit.")
+
+    elif m == "cycle":
+        # The whole actuator chain in one loop: drive, seeder (spool + solenoid), body turn.
+        # Deliberately NOT a row: each iteration ends with a turn, so n=4 x turn=90 walks
+        # a square and returns to the start — an integration test whose error you can see
+        # on the ground, not just a distance to tape-measure.
+        opts = kv(args, n="3", hop="0.4", turn="90", dir="right",
+                  angles="0,90", dwell="0.6")
+        n = int(float(opts["n"]))
+        hop, turn_deg = float(opts["hop"]), float(opts["turn"])
+        dwell = float(opts["dwell"])
+        angles = [int(float(a)) % 180 for a in str(opts["angles"]).split(",") if a != ""]
+        robot = build_robot(opts)
+        sign = -1 if opts["dir"] == "right" else 1        # right = CW = heading decreases
+        spots = ", ".join(f"{a}/{a + 180}" for a in angles)
+        print(f"cycle: {n} x [ {hop}m -> plant {spots} ({2 * len(angles)} seeds) -> "
+              f"{turn_deg:.0f}deg {opts['dir']} ]")
+        print("seeder: " + ("ARMED — solenoid WILL fire" if robot.plant_enabled
+                            else "DISARMED — spool moves, solenoid stays off"))
+        print("battery at start:", volts(bridge()))
+        seeds = 0
+        try:
+            for i in range(n):
+                robot.forward(hop)
+                print(f"  [{i + 1}/{n}] hop {hop}m  pack={robot.volts()}  "
+                      f"gain={robot._gain():.2f}x")
+                print("     ", diag_line(robot.diag_log[-1] if robot.diag_log else None))
+                seeds += robot.plant_cross(angles, dwell_s=dwell)
+                print(f"     planted {spots} — {seeds} seeds so far")
+                robot.turn_to(robot.heading + sign * turn_deg)
+                print(f"     turned {turn_deg:.0f}deg {opts['dir']} -> "
+                      f"commanded heading {robot.heading:.0f}")
+                print("     ", diag_line(robot.diag_log[-1] if robot.diag_log else None))
+        finally:
+            robot.stop()
+        print(f"\ndone. {n} cycles, {seeds} seeds. commanded pose "
+              f"x={robot.x:.2f} y={robot.y:.2f} heading={robot.heading:.0f} (started 90)")
+        print("battery at end:", volts(bridge()))
+        report_warnings(robot, "/app/python/field_diag.json")
+        print("\nMEASURE:")
+        print(f"  · hop length each time (expect {hop:.2f}m) — does it drift over the 3?")
+        print(f"  · turn angle each time (expect {turn_deg:.0f}deg) — same question")
+        print(f"  · the seed holes: {2 * len(angles)} per stop, in a cross around the spot")
+        if abs(n * turn_deg % 360) < 1e-6:
+            print("  · the turns close a full circle — the robot should end where it "
+                  "started, facing the same way. Any gap is the ACCUMULATED error.")
+
+    elif m == "battlog":
+        # Summarise the continuous A4 log the console writes. The point is to catch
+        # an INTERMITTENT fault: a reading that is low *and* unstable is a wiring
+        # problem, and whether the dips coincide with driving says which kind.
+        import csv
+        n = int(args[0]) if args else 200
+        path = "/app/battery.csv"
+        try:
+            rows = list(csv.DictReader(open(path)))
+        except OSError as e:
+            return print(f"no log yet at {path} ({e}) — is the console app running?")
+        if not rows:
+            return print("log is empty")
+        rows = rows[-n:]
+        vals = [float(r["volts"]) for r in rows if r["volts"]]
+        moving = [r for r in rows if r["left"] not in ("", "0", "None")]
+        idle = [float(r["volts"]) for r in rows if r["left"] in ("", "0", "None") and r["volts"]]
+        print(f"{len(rows)} samples  {rows[0]['utc']} .. {rows[-1]['utc']}")
+        print(f"  all    : min {min(vals):.2f}  max {max(vals):.2f}  "
+              f"spread {max(vals) - min(vals):.2f}V")
+        if idle:
+            print(f"  IDLE   : min {min(idle):.2f}  max {max(idle):.2f}  "
+                  f"spread {max(idle) - min(idle):.2f}V   <- judge the sensor on THIS")
+        print(f"  moving : {len(moving)} samples (sag here is real, not a fault)")
+        # the tell: big swings while idle
+        if idle and max(idle) - min(idle) > 0.3:
+            print("  !! idle spread > 0.3V — unstable sensor, suspect the A4 connection")
+        elif idle:
+            print("  idle reading looks stable")
+        print("  worst dips:")
+        for r in sorted(rows, key=lambda r: float(r["volts"] or 99))[:5]:
+            print(f"    {r['utc']}  {r['volts']}V  raw={r['raw']}  "
+                  f"motors={r['left']}/{r['right']}  src={r['src']}  run={r['run_state']}")
 
     elif m == "uturn":
         # The row change: A->B (row), B->B1 (90 deg, row gap, 90 deg), B1->C (next row).

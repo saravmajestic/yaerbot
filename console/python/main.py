@@ -116,6 +116,17 @@ def trimmed(left, right):
     return int(left * LEFT_TRIM), int(right * RIGHT_TRIM)
 
 
+# Calibration measured 2026-08-11 (hard floor, 3S ~12V). These are surface- and
+# hardware-specific — recalibrate after ANY mechanical/wiring change with
+# scripts/field_test.py (solve/tsolve). See docs/farm-os/drive-precision.md.
+# batt_comp stays off: the A4 divider still reads low and wanders.
+CAL = {
+    "pwm": 180, "speed": 0.616, "startup": 0.104,
+    "ltrim": 0.75, "rtrim": 1.00,
+    "turn_pwm": 120, "tdps": 51.0, "tstartup": -0.75, "tramp": 0.0,
+}
+
+
 # ── Diagnostics: what THIS side last sent ──────────────────────────────────
 # The Diag tab traces one command end to end (browser → console → MCU → driver
 # pins → motor current). Stages 3-5 come from the MCU's getDiag; this records
@@ -701,15 +712,6 @@ def _battery():
     return int(round(_batt_ema["pct"])), round(_batt_ema["v"], 2)
 
 # ── Plot seeding (Act 2): mark a plot, plan a serpentine, drive it ──────────
-# Calibration measured 2026-08-11 (hard floor, 3S ~12V). These are surface- and
-# hardware-specific — recalibrate after ANY mechanical/wiring change with
-# scripts/field_test.py (solve/tsolve). See docs/farm-os/drive-precision.md.
-# batt_comp stays off: the A4 divider still reads low and wanders.
-CAL = {
-    "pwm": 180, "speed": 0.616, "startup": 0.104,
-    "ltrim": 0.75, "rtrim": 1.00,
-    "turn_pwm": 120, "tdps": 51.0, "tstartup": -0.75, "tramp": 0.0,
-}
 
 # The 4 corner marks are a MOCK: the operator walks the plot and taps each corner,
 # which is the demo gesture for "this is the land". There is no absolute position
@@ -995,6 +997,67 @@ def on_get_diag(client, data):
     })
 
 
+# ── Battery / A4 logger ─────────────────────────────────────────────────────
+# The A4 divider reading has been intermittently low and unstable (see
+# docs/farm-os/drive-precision.md and the firmware's BATT_PIN notes). An
+# intermittent fault can't be caught by watching a terminal, so log it
+# continuously with the motor state alongside — if the dips line up with driving
+# it's a ground/noise problem, and if they're random it's a contact problem.
+# Written under the app dir, which is mounted to ~/motor-control on the host, so
+# it survives container restarts and can be pulled with scp.
+_BATT_CSV = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "battery.csv"))
+_BATT_CSV_MAX = 2_000_000          # ~2MB, then start a fresh file (keep one .1 backup)
+
+
+def _batt_log_loop(period_s=2.0):
+    header = "utc,raw,volts,pct,src,left,right,run_state\n"
+    try:
+        if not os.path.exists(_BATT_CSV) or os.path.getsize(_BATT_CSV) == 0:
+            with open(_BATT_CSV, "w") as f:
+                f.write(header)
+    except OSError as e:                              # noqa: BLE001
+        log("battery log disabled (%s)" % e)
+        return
+    while True:
+        time.sleep(period_s)
+        try:
+            d = json.loads(_decode(Bridge.call("getDiag")))
+            b = d.get("batt", {})
+            row = "%s,%.1f,%.2f,%s,%s,%s,%s,%s\n" % (
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                b.get("raw", 0.0), b.get("volts", 0.0),
+                _battery_pct(b.get("volts")),
+                _last_cmd.get("src") or "", _last_cmd.get("left"),
+                _last_cmd.get("right"), _run["state"])
+            with open(_BATT_CSV, "a") as f:
+                f.write(row)
+            if os.path.getsize(_BATT_CSV) > _BATT_CSV_MAX:
+                os.replace(_BATT_CSV, _BATT_CSV + ".1")
+                with open(_BATT_CSV, "w") as f:
+                    f.write(header)
+        except Exception:                             # noqa: BLE001
+            pass                                      # never let logging kill the app
+
+
+def _battery_pct(volts):
+    """Same per-cell LiPo curve the firmware uses, for a self-contained CSV."""
+    if not volts:
+        return ""
+    v = volts / 3.0
+    table = [(3.30, 0), (3.40, 3), (3.55, 8), (3.65, 15), (3.70, 25), (3.75, 35),
+             (3.80, 45), (3.85, 55), (3.90, 65), (4.00, 80), (4.10, 90), (4.20, 100)]
+    if v <= table[0][0]:
+        return 0
+    if v >= table[-1][0]:
+        return 100
+    for i in range(1, len(table)):
+        if v < table[i][0]:
+            v0, p0 = table[i - 1]
+            v1, p1 = table[i]
+            return int(p0 + (v - v0) / (v1 - v0) * (p1 - p0) + 0.5)
+    return 100
+
+
 def on_get_stats(client, data):
     batt_pct, batt_v = _battery()
     ui.send_message("stats", {
@@ -1035,5 +1098,8 @@ ui.on_message("run_start",     logged("run_start",   on_run_start))
 ui.on_message("run_pause",     logged("run_pause",   on_run_pause))
 ui.on_message("run_stop",      logged("run_stop",    on_run_stop))
 ui.on_message("get_plot",      on_get_plot)
+
+# start the battery/A4 logger (daemon: dies with the app, never blocks shutdown)
+threading.Thread(target=_batt_log_loop, daemon=True).start()
 
 App.run()

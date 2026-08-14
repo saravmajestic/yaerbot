@@ -53,6 +53,12 @@ class SimRobot:
     def plant(self) -> None:
         self.planted.append((self.x, self.y))
 
+    def plant_cross(self, angles=(0, 90), dwell_s: float = 0.0) -> int:
+        """Mirror of BridgeRobot.plant_cross: 2 seeds per arm position, same spot."""
+        for _ in angles:
+            self.planted.append((self.x, self.y))
+        return 2 * len(tuple(angles))
+
     def stop(self) -> None:
         pass
 
@@ -282,6 +288,29 @@ class BridgeRobot:
         if self.plant_enabled:
             self._b().call("plantSeed")
         self.planted.append((self.x, self.y))
+
+    def plant_cross(self, angles=(0, 90), dwell_s: float = 0.6) -> int:
+        """Plant at several ARM POSITIONS from one stop; returns the seed count.
+
+        The arm carries 2 outlets 180 deg apart and ONE solenoid fires both, so each
+        plantSeed drops 2 seeds. angles=(0, 90) therefore lays a 4-seed cross:
+        0/180, rotate, 90/270. Angles are arm positions mod 180 — the S3003 only
+        travels 0..180 and the opposite outlet supplies the +180 half.
+
+        The arm is left back at 0 (flat) so it can't foul the ground while driving.
+        """
+        seeds = 0
+        B = self._b()
+        for a in angles:
+            B.call("indexSpool", int(a) % 180)
+            time.sleep(dwell_s)               # servo must ARRIVE before the drop
+            if self.plant_enabled:
+                B.call("plantSeed")           # punch -> drop (both outlets) -> retract
+            seeds += 2
+            self.planted.append((self.x, self.y))
+        B.call("indexSpool", 0)               # flat for driving
+        time.sleep(dwell_s)
+        return seeds
 
     def stop(self) -> None:
         self._b().call("stop")
