@@ -416,6 +416,7 @@ def _cam_loop(url):
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
     armed = True                # detection-edge debounce (see the drip branch)
     driving_since = None        # when the current drive segment began
+    tube_seen = None            # last tube["found"], for EDGE logging (None = no edge yet)
     last_push = 0.0
     push_interval = 1.0 / _BROWSER_FPS
     try:
@@ -448,7 +449,44 @@ def _cam_loop(url):
             _save_capture(frame)
             _capture["last"] = now
 
-        if _run["mode"] == "drip" and _run["state"] == "running":
+        # Tube found/lost EDGE logging. Logging every frame would flood at frame rate,
+        # but logging nothing left "the robot moved 5cm and stopped" with no trace at
+        # all in the log (2026-08-15) — the stall was invisible. So: log the two
+        # transitions only, and only while a follow-run is active, otherwise an idle
+        # camera would chatter every time something passes in front of it.
+        _following = _run["state"] == "running" and _run["mode"] in ("scan", "drip")
+        if not _following:
+            tube_seen = None                  # next run starts clean, logs its first edge
+        elif tube["found"] != tube_seen:
+            tube_seen = tube["found"]
+            if tube_seen:
+                log("tube REGAINED (x=%s px, correction=%+.2f) — driving resumes"
+                    % (tube.get("tube_x"), tube.get("correction") or 0.0))
+            else:
+                log("tube LOST — motors stopped. Run is STILL ACTIVE and will drive "
+                    "again by itself when the tube is back in view; capture keeps "
+                    "running throughout. Press Stop to end the run.")
+
+        if _run["mode"] == "scan" and _run["state"] == "running":
+            # CAMERA-TAB RUN: follow the tube and collect frames. The seeder is not
+            # touched at all — no indexSpool, no plantSeed, not even in dry form. It
+            # also does NOT stop at emitters: the detector still annotates the live
+            # view so you can see what it would find, but stopping would fill the
+            # dataset with near-duplicate frames of whatever it stopped in front of.
+            # Ends only when the operator presses Stop, or if the tube is lost.
+            if tube["found"]:
+                c = tube["correction"]
+                l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
+                               int(_BASE_PWM - _STEER_GAIN * c))
+                _drive(max(0, min(255, l)), max(0, min(255, r)), "scan", "forward")
+                if driving_since:
+                    travelled += (now - driving_since) * _DRIP_SPEED_MPS
+                driving_since = now
+            else:
+                _drive_stop("scan")          # lost the tube — don't drive blind
+                driving_since = None
+
+        elif _run["mode"] == "drip" and _run["state"] == "running":
             detected = emit["detected"] and emit["confidence"] >= _EMIT_CONF
             # Debounce on the DETECTION EDGE, not on an assumed spacing: the model is
             # what finds emitters, so "this one again" means "still in view". Re-arm
@@ -549,8 +587,10 @@ def _drip_seeds_per_emitter():
 
 
 def _drip_ui_state():
-    """"following"/"idle" for the camera overlay, which predates the unified run."""
-    return "following" if (_run["mode"] == "drip" and _run["state"] == "running") else "idle"
+    """"following"/"idle" for the camera overlay. Covers BOTH tube-following runs —
+    `scan` (camera tab, collect frames) and `drip` (seed tab, plant at emitters)."""
+    return ("following" if (_run["mode"] in ("scan", "drip")
+                            and _run["state"] == "running") else "idle")
 
 
 def _drip_readiness():
@@ -729,12 +769,39 @@ _plot = {
 # position (plain) or an emitter the model saw (drip). So state, controls, dry
 # run, progress and the report are shared; only the config cards differ.
 _run = {
-    "mode": "plain",            # plain | drip
+    "mode": "plain",            # plain | drip | scan
     "state": "idle",            # idle | running | paused | done | stopped | error
     "planted": 0, "total": 0, "msg": "", "dry": True,
     "positions": [],            # where seeds actually went, for the report
 }
 _plot_thread = None
+# `scan` is the CAMERA tab's run: follow the tube and collect training frames, with the
+# seeder never touched. Deliberately separate from `drip` rather than a flag on it —
+# seeding lives on the Seed tab, and a data-collection run must not be one wrong click
+# away from firing a solenoid. It also does NOT stop at emitters: standing still would
+# just fill the dataset with near-duplicate frames of the same emitter.
+_scan_owns_capture = False      # did scan turn capture on? then scan turns it back off
+
+# ── MCU bridge health ───────────────────────────────────────────────────────
+# A dead RouterBridge is INVISIBLE from the browser: the web UI keeps serving, keeps
+# accepting clicks and keeps logging them, while every Bridge.call raises and nothing
+# reaches the MCU. On 2026-08-15 that cost a whole field session — the operator
+# pressed Shutdown (deliberately), the board halted and auto-restarted, and from then
+# on Follow/Stop/capture all looked like dead buttons. The battery logger already polls
+# getDiag every 2s, so it doubles as the health monitor: it is the one thing guaranteed
+# to touch the bridge on a timer whatever else the robot is doing.
+_bridge = {"ok": True, "since": 0.0, "err": ""}
+
+
+def _set_bridge(ok, err=""):
+    """Record bridge health; log + push only on a CHANGE, not every poll."""
+    if _bridge["ok"] != ok:
+        _bridge.update(ok=ok, since=time.time(), err=str(err)[:120])
+        log("BRIDGE %s" % ("UP — MCU link restored" if ok else
+                           "DOWN — no MCU link (%s). Motors/seeder/sensors are all "
+                           "unreachable until this recovers." % (err or "?")))
+    else:
+        _bridge["ok"] = ok
 
 
 class _Abort(Exception):
@@ -921,14 +988,41 @@ def on_run_start(client, data):
         _run["dry"] = bool(data["dry"])
     if "mode" in data:
         _run["mode"] = data["mode"]
+    global _scan_owns_capture
     if _run["state"] in ("running", "paused"):
-        return
-    if len(_plot["corners"]) < 4:
+        # Used to return silently, which is indistinguishable from a broken button —
+        # and a tube-lost run sits in "running" while parked, so this fires often.
+        _run["msg"] = ("already running (%s) — press Stop first" % _run["mode"]
+                       if _run["state"] == "running" else "paused — press Start to resume")
+        return _emit_run()
+    # scan needs no plot: it's a data-collection drive down whatever tube is in front of
+    # the camera, not a run over a marked piece of land.
+    if _run["mode"] != "scan" and len(_plot["corners"]) < 4:
         _run["msg"] = "mark all 4 corners first"
         return _emit_run()
 
     _run.update(planted=0, total=0, msg="", positions=[])
-    if _run["mode"] == "drip":
+    if _run["mode"] == "scan":
+        if not (_VISION_OK and _cam["url"]):
+            _run["msg"] = "connect the camera first — scan follows the tube by sight"
+            return _emit_run()
+        # Turn capture on for the operator: the whole point of the run is the frames.
+        # Remember whether WE turned it on, so stopping the scan doesn't switch off a
+        # capture the operator had already started for their own reasons.
+        if not _capture["on"]:
+            _capture["on"] = True
+            _capture["last"] = 0.0            # first frame immediately
+            _scan_owns_capture = True
+            os.makedirs(_CAP_DIR, exist_ok=True)
+            _emit_capture_status()
+            # SAY SO. This used to happen silently, and the matching silent switch-off
+            # in on_run_stop made capture look like it was toggling itself (2026-08-15).
+            log("scan: capture turned ON automatically (scan started it, "
+                "so Stop will turn it off again)")
+        _run["state"] = "running"
+        log("scan run: follow tube + capture every %.1fs -> %s. SEEDER NOT USED."
+            % (_capture["interval"], _CAP_DIR))
+    elif _run["mode"] == "drip":
         if not (_VISION_OK and _cam["url"]):
             _run["msg"] = "connect the camera first — the emitter model is the trigger"
             return _emit_run()
@@ -962,11 +1056,22 @@ def on_run_pause(client, data):
 
 
 def on_run_stop(client, data):
+    global _scan_owns_capture
     if _run["state"] in ("running", "paused"):
-        _run["state"] = "stopped"        # plain: _gate() raises _Abort; drip: loop exits
+        _run["state"] = "stopped"        # plain: _gate() raises _Abort; drip/scan: loop exits
         if _run["mode"] == "drip" and _run["positions"]:
             _emit_report(_drip_runlog())
-        _run["msg"] = "stopped by operator"
+        if _run["mode"] == "scan":
+            _run["msg"] = "scan stopped — %d frames captured" % _capture["count"]
+        else:
+            _run["msg"] = "stopped by operator"
+    if _scan_owns_capture:               # only undo the capture WE started
+        _capture["on"] = False
+        _scan_owns_capture = False
+        log("scan: capture turned OFF automatically (%d frames total). Scan had turned "
+            "it on; use the Capture card's Start to keep collecting while parked."
+            % _capture["count"])
+        _emit_capture_status()
     _drive_stop("run")
     _emit_run()
 
@@ -1035,6 +1140,11 @@ def _batt_log_loop(period_s=2.0):
                 os.replace(_BATT_CSV, _BATT_CSV + ".1")
                 with open(_BATT_CSV, "w") as f:
                     f.write(header)
+            _set_bridge(True)                         # getDiag answered -> link is alive
+        except Exception as e:                        # noqa: BLE001
+            _set_bridge(False, e)                     # ...and this is how we learn it died
+        try:
+            ui.send_message("bridge", dict(_bridge))  # cheap; a fresh tab syncs in <=2s
         except Exception:                             # noqa: BLE001
             pass                                      # never let logging kill the app
 

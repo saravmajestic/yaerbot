@@ -49,3 +49,25 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn(); print(f"ok  {name}")
     print("all path tests passed")
+
+
+def test_count_never_overruns_the_plot():
+    """Rounding UP put the last point past the plot edge — in the field that means
+    driving into the headland with no room to turn. Short is the safe error."""
+    # 5.0 m at 0.3 m: round() gave 18 points ending at 5.10 m, outside the plot
+    cfg = SeedPlan(plot_w_m=5.0, plot_l_m=5.0, row_gap_m=0.3, seed_gap_m=0.3,
+                   edge_margin_m=0.0)
+    for y in seed_ys(cfg):
+        assert y <= cfg.plot_l_m, f"seed at {y} is outside a {cfg.plot_l_m} m plot"
+    for x in row_xs(cfg):
+        assert x <= cfg.plot_w_m, f"row at {x} is outside a {cfg.plot_w_m} m plot"
+
+
+def test_exact_multiples_are_not_shortchanged():
+    """The float guard: 4.8/0.4 is 11.9999... in binary, so a bare int() would drop
+    the last legitimate seed off a row whose length IS an exact multiple of the gap."""
+    cfg = SeedPlan(plot_w_m=1.2, plot_l_m=4.8, row_gap_m=0.4, seed_gap_m=0.4,
+                   edge_margin_m=0.0)
+    ys = seed_ys(cfg)
+    assert len(ys) == 13          # 0.0 .. 4.8 inclusive
+    assert abs(ys[-1] - 4.8) < 1e-9, f"last seed at {ys[-1]}, expected the edge at 4.8"

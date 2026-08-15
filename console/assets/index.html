@@ -235,10 +235,12 @@
         <div class="card">
           <div class="seed-status" id="cam-status">Vision: —</div>
           <div class="row">
-            <button class="btn-wide start" id="drip-start">▶ Follow drip line</button>
+            <button class="btn-wide start" id="drip-start">▶ Follow tube &amp; capture</button>
             <button class="btn-wide sstop" id="drip-stop">■ Stop</button>
           </div>
-          <p class="hint">Robot follows the drip tube via on-device CV and plants at each detected emitter.</p>
+          <p class="hint">Data collection: creeps along the drip tube via on-device CV and
+          saves frames for training. <b>The seeder is never used</b> — capture turns on
+          automatically and off again on Stop. To plant, use the Seed tab.</p>
         </div>
 
         <div class="card">

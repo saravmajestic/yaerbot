@@ -126,7 +126,9 @@ document.getElementById('cam-set').addEventListener('click', () => {
 });
 
 // Cam tab shortcuts for the same unified run (Seed tab owns the config)
-document.getElementById('drip-start').addEventListener('click', () => socket.emit('run_start', { mode: 'drip' }));
+// Camera tab = DATA COLLECTION only. This follows the tube and captures frames; it
+// never plants. Seeding lives on the Seed tab, which has its own Run control.
+document.getElementById('drip-start').addEventListener('click', () => socket.emit('run_start', { mode: 'scan' }));
 document.getElementById('drip-stop').addEventListener('click',  () => socket.emit('run_stop', {}));
 
 // ── Dataset capture (collect the emitter training set while driving) ──────────
@@ -178,13 +180,35 @@ function renderVisionStatus(d) {
     return;
   }
   const tube = d.tube || {}, em = d.emitter || {};
+  const running = d.drip === 'following';
   const bits = [];
+  // While a run is active the tube state IS the run state — say which, plainly. A
+  // stalled run used to look identical to a broken one from here.
+  if (running) {
+    bits.push(tube.found ? '▶ FOLLOWING' : '⏸ TUBE LOST — searching (motors stopped)');
+  }
   bits.push(tube.found ? `tube corr ${tube.correction >= 0 ? '+' : ''}${tube.correction}` : 'no tube');
   if (em.detected) bits.push(`emitter ${em.confidence}`);
-  if (d.drip === 'following') bits.push('· FOLLOWING');
-  st.textContent = bits.join(' ').trim() || '—';
-  st.className = 'seed-status ' + (d.drip === 'following' ? 'running' : '');
+  st.textContent = bits.join(' · ').trim() || '—';
+  st.className = 'seed-status ' + (running ? (tube.found ? 'running' : 'warn') : '');
 }
+
+// ── MCU bridge health banner ────────────────────────────────────────────────
+// A dead bridge leaves the whole console looking healthy while nothing reaches the
+// robot. Make that impossible to miss.
+socket.on('bridge', (d) => {
+  let el = document.getElementById('bridge-banner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'bridge-banner';
+    document.body.prepend(el);
+  }
+  el.className = d.ok ? 'bridge-banner ok' : 'bridge-banner down';
+  el.textContent = d.ok ? '' :
+    '⚠ NO MCU LINK — motors, seeder and sensors are unreachable. ' +
+    'Buttons will do nothing until the bridge recovers.';
+  el.style.display = d.ok ? 'none' : 'block';
+});
 
 // annotated frames from the UNO Q (tube/emitter overlay already drawn in)
 socket.on('cam_frame', (d) => {

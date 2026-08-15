@@ -22,6 +22,18 @@ Runs (key=value args, any order):
   row   drive one row as stop-and-go hops, then a row-end turn
         total=1.2 hop=0.4 turn=90 dir=right speed=<m/s> tdps=<deg/s>
         [pwm=180] [startup=<s>] [tstartup=<s>] [ltrim=] [v=<v_cal>] [nobatt] [plant]
+        The seeder flags are INDEPENDENT and both default OFF — four combinations:
+          (neither)    drive only, nothing planted
+          plant        one 2-seed drop per stop (spool never moves)
+          cross        spool sweeps at each stop, solenoid stays OFF (rehearsal)
+          cross plant  the 4-spot pattern: 0/90/180/270, 4 seeds per stop
+        [cross=0,90] to pick the arm positions.  [dwell=0.6] arm settle before a drop.
+        Every run prints a "SEEDER:" line saying which of the four you got.
+        [rows=3] [rowgap=0.4] — serpentine over N rows. Between rows it does a real
+        ROW CHANGE (turn + rowgap + turn, alternating), NOT a 180 spin-in-place, so
+        each row is offset into fresh ground. With rows=1 you get the old single
+        end-of-row turn instead.
+        Hop count ALWAYS ROUNDS DOWN: a long row leaves no headland to turn in.
   spool S3003 arm calibration — SEEDER ONLY, never touches the drive motors:
         spool sweep [from=0] [to=180] [step=15] [dwell=3]   step + hold, you measure
         spool go <deg>                                      park at one commanded angle
@@ -51,6 +63,15 @@ import sys
 import time
 
 sys.path.insert(0, "/app/python")
+
+# Stream the log as it happens. stdout is BLOCK-buffered when it isn't a terminal, and
+# these runs are always piped (ssh -> docker exec), so a 20-hop row printed nothing at
+# all until it finished — useless when the whole point is watching the robot against
+# the log, and worse, a run you abort shows you nothing about where it got to.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except (AttributeError, OSError):        # odd stream; `python3 -u` is the fallback
+    pass
 
 
 def bridge():
@@ -223,26 +244,88 @@ def main() -> None:
               f"{dead + check / rate:.2f}s)")
 
     elif m == "row":
-        opts = kv(args, total="1.2", hop="0.4", turn="90", dir="right")
+        opts = kv(args, total="1.2", hop="0.4", turn="90", dir="right", dwell="0.6")
         total, hop = float(opts["total"]), float(opts["hop"])
-        turn_deg = float(opts["turn"])
+        turn_deg, dwell = float(opts["turn"]), float(opts["dwell"])
+        # `cross` (bare flag, or cross=0,90) plants the 4-spot pattern at every stop
+        # instead of a single 2-seed drop. Arm positions, not seed positions: each one
+        # drops 2 seeds 180 deg apart, so 0,90 puts seeds at 0/90/180/270.
+        cx = opts.get("cross")
+        angles = ([0, 90] if cx is True else
+                  [int(float(a)) % 180 for a in str(cx).split(",") if a != ""] if cx
+                  else None)
         robot = build_robot(opts)
-        hops = int(round(total / hop))
-        print(f"row: {hops} x {hop}m = {hops * hop:.2f}m, then {turn_deg:.0f}deg {opts['dir']}")
+        # ALWAYS ROUND DOWN — a long row runs out of headland to turn around in, so a
+        # short row is the safe error. The 1e-6 is required, not cosmetic: 5.0/0.4 is
+        # 12.4999... and 4.8/0.4 is 11.9999... in binary floating point, so a bare
+        # int() would drop a legitimate hop off any row that IS an exact multiple.
+        hops = int(total / hop + 1e-6)
+        if hops * hop < total - 1e-9:
+            print(f"note: {total}m / {hop}m doesn't divide evenly — rounding DOWN to "
+                  f"{hops} hops = {hops * hop:.2f}m (short, so the headland is safe)")
+        rows = int(float(opts.get("rows", 1)))
+        rowgap = float(opts.get("rowgap", hop))
+        sign = -1 if opts["dir"] == "right" else 1      # right = CW = heading decreases
+        spots = ", ".join(f"{a}/{a + 180}" for a in angles) if angles else "single (2 seeds)"
+        print(f"row: {rows} row(s) x {hops} x {hop}m = {hops * hop:.2f}m each, "
+              f"planting {spots}")
+        if rows > 1:
+            print(f"  row change: {turn_deg:.0f}deg + {rowgap}m + {turn_deg:.0f}deg, "
+                  f"first one {opts['dir']}, alternating (serpentine)")
+        else:
+            print(f"  then a single {turn_deg:.0f}deg {opts['dir']} at the end")
+        # Say the seeder state in words. `cross` and `plant` are INDEPENDENT and both
+        # default off, which gives four legitimate combinations — spelling out which one
+        # you got beats discovering it from the seed count afterwards.
+        #   (neither)     drive only
+        #   plant         one 2-seed drop per stop, spool never moves
+        #   cross         spool sweeps, solenoid stays off  (rehearse the arm, no seeds)
+        #   cross plant   the 4-spot pattern
+        stops = hops * rows
+        if angles is None and not robot.plant_enabled:
+            print("  SEEDER: OFF — drive only. Add `plant` for a single drop per stop, "
+                  "or `cross plant` for 4 spots.")
+        elif angles is None:
+            print(f"  SEEDER: ARMED, SINGLE DROP — 2 seeds at each of {stops} stops = "
+                  f"{2 * stops} seeds. The spool does NOT move; add `cross` for 4 spots.")
+        elif not robot.plant_enabled:
+            print("  SEEDER: DRY CROSS — the spool sweeps at every stop, solenoid stays "
+                  "OFF. Add `plant` to fire it.")
+        else:
+            print(f"  SEEDER: ARMED, 4-SPOT CROSS — {2 * len(angles)} seeds at each of "
+                  f"{stops} stops = {2 * len(angles) * stops} seeds.")
         print("battery at start:", volts(bridge()))
+        seeds = 0
         try:
-            for i in range(hops):
-                robot.forward(hop)
-                if robot.plant_enabled:
-                    robot.plant()
-                print(f"  hop {i + 1}/{hops}: commanded y={robot.y:.2f}m  "
-                      f"pack={robot.volts()}  duty gain={robot._gain():.2f}x")
-                print("   ", diag_line(robot.diag_log[-1] if robot.diag_log else None))
-            sign = -1 if opts["dir"] == "right" else 1      # right = CW = heading decreases
-            robot.turn_to(robot.heading + sign * turn_deg)
+            for r in range(rows):
+                for i in range(hops):
+                    robot.forward(hop)
+                    if angles is not None:
+                        seeds += robot.plant_cross(angles, dwell_s=dwell)
+                    elif robot.plant_enabled:
+                        robot.plant(); seeds += 2
+                    print(f"  row {r + 1}/{rows} hop {i + 1}/{hops}: "
+                          f"commanded x={robot.x:.2f} y={robot.y:.2f}  seeds={seeds}  "
+                          f"pack={robot.volts()}  duty gain={robot._gain():.2f}x")
+                    print("   ", diag_line(robot.diag_log[-1] if robot.diag_log else None))
+                if rows == 1:
+                    robot.turn_to(robot.heading + sign * turn_deg)   # legacy single turn
+                elif r < rows - 1:
+                    # ROW CHANGE, not a U-turn: turn, cross the row gap, turn again. The
+                    # two turns go the SAME way (which is why per-turn overshoot doubles
+                    # here — see `uturn`), and the pair ALTERNATES direction each row, so
+                    # the path serpentines and every row is driven in the opposite sense.
+                    s = sign if r % 2 == 0 else -sign
+                    way = "right" if s < 0 else "left"
+                    robot.turn_to(robot.heading + s * turn_deg)
+                    robot.forward(rowgap)
+                    robot.turn_to(robot.heading + s * turn_deg)
+                    print(f"  -- row change {r + 1}->{r + 2} ({way}): now at "
+                          f"x={robot.x:.2f} y={robot.y:.2f} heading={robot.heading:.0f}")
         finally:
             robot.stop()
-        print(f"done. commanded pose x={robot.x:.2f} y={robot.y:.2f} heading={robot.heading:.0f}")
+        print(f"done. {seeds} seeds. commanded pose x={robot.x:.2f} y={robot.y:.2f} "
+              f"heading={robot.heading:.0f}")
         print("battery at end:", volts(bridge()))
         report_warnings(robot, "/app/python/field_diag.json")
         print(f"MEASURE: distance travelled (expect {hops * hop:.2f}m) and the turn "

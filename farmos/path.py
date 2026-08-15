@@ -23,11 +23,21 @@ class Waypoint:
 
 
 def _count(span: float, inset: float, gap: float) -> int:
-    """How many points fit at `gap` spacing within `span`, inset from both edges."""
+    """How many points fit at `gap` spacing within `span`, inset from both edges.
+
+    ALWAYS ROUNDS DOWN. Rounding up put the last point past the usable span — in the
+    field that means driving into the headland with no room left to turn around, so
+    a short row is always the safe error. (span=5, gap=0.3 rounded up to 18 points,
+    the last at 5.1m; flooring gives 17, the last at 4.8m.)
+
+    The 1e-6 is not cosmetic: 5.0/0.4 evaluates to 12.4999... and 4.8/0.4 to
+    11.9999... in binary floating point, so a bare int() would silently drop a
+    legitimate hop off any row whose length is an exact multiple of the gap.
+    """
     usable = span - 2 * inset
     if usable < 0:
         return 0
-    return int(round(usable / gap)) + 1
+    return int(usable / gap + 1e-6) + 1
 
 
 def row_xs(cfg: SeedPlan) -> list[float]:
