@@ -24,10 +24,20 @@ import cv2
 # label you use in Edge Impulse (the model may also emit a background class).
 EMITTER_LABELS = {"emitter", "dripper", "hole"}
 
-# OFF by default: constructing the object_detection brick with no deployed model
-# blocks ~60s trying to reach the EI runner service. Enable only once a model is
-# deployed, via env: FARMOS_EMITTER_ML=1
-_ENABLED = os.environ.get("FARMOS_EMITTER_ML", "").strip().lower() in ("1", "true", "yes", "on")
+# ON by default since 2026-08-16, when the trained model was installed and bound to the
+# app. It used to default OFF because constructing the brick with NO deployed model
+# blocks ~60s trying to reach the EI runner — but the model is now declared in app.yaml
+# (`arduino:object_detection: {model: ...}`), so App Lab starts a healthy runner
+# alongside the app and that stall cannot happen in this deployment.
+#
+# Defaulting off was also actively harmful: App Lab regenerates the compose files on
+# every start, so there is nowhere durable to inject an env var into the app container.
+# A flag that cannot be set is a flag that is always off, and the symptom is a model
+# that loads perfectly while the console silently keeps using classical CV.
+#
+# Set FARMOS_EMITTER_ML=0 to force the classical detector (useful if the model
+# misbehaves in the field — the fallback path stays fully functional).
+_ENABLED = os.environ.get("FARMOS_EMITTER_ML", "1").strip().lower() not in ("0", "false", "no", "off")
 
 _BRICK_OK = False
 if _ENABLED:

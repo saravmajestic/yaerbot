@@ -2,6 +2,92 @@
 
 ---
 
+## [App Lab] Model installs but the runner still serves `yolo-x`; app vanishes from App Lab (2026-08-16)
+
+Installing the trained FOMO model took most of a day. Recording the whole shape of it,
+because almost none of this is in the docs and every failure mode was **silent**.
+
+### The model is bound in `app.yaml`, not by the UI
+
+Brick entries are **mappings**, and `model:` is the binding:
+
+```yaml
+bricks:
+- arduino:web_ui: {}
+- arduino:object_detection:
+    model: ei-model-1088852-1     # id from: curl 127.0.0.1:8800/v1/models
+```
+
+App Lab then resolves it to its own store and writes the real path into the generated
+compose (`.cache/app-compose-overrides.yaml`):
+
+```
+EI_OBJ_DETECTION_MODEL: /home/arduino/.arduino-bricks/models/custom-ei/<id>/model.eim
+```
+
+**Because it lives in `app.yaml` it survives `arduino-app-cli app start` and a reboot.**
+Before we found this, every restart silently reverted to the stock `/models/ootb/ei/
+yolo-x-nano.eim` — the app ran, the runner reported *healthy*, and it served 80 COCO
+classes. Nothing anywhere said the wrong model was loaded. **Always verify:**
+
+```bash
+ssh unoq 'curl -s http://127.0.0.1:1337/api/info' | head -5    # want labels ['emitter']
+```
+
+### Dead ends that cost hours — don't repeat them
+
+| Attempted | Why it fails |
+|---|---|
+| Copy the `.eim` into `~/.arduino-bricks/ei-models/` | the runner's `--model-file` comes from compose interpolation, not from that directory |
+| Export `EI_OBJ_DETECTION_MODEL` before `app start` | `arduino-app-cli` does not pass its shell environment to compose |
+| A `.env` in the compose project dir (`.cache/`) | not read |
+| Hand-edit `app-compose-overrides.yaml` | **regenerated on every app start** — silently reverted |
+| Register a custom model via the API | `/v1/models` is **read-only** (`Allow: GET, HEAD`) and cloud-backed |
+
+### The apps directory moved
+
+The Aug-2026 App Lab runtime upgrade (offered as a "library update") changed:
+
+```
+Apps Directory: /home/arduino/ArduinoApps      ← new; App Lab ONLY scans here
+```
+
+Our app at `~/motor-control` **disappeared from App Lab while still running**. Nothing was
+lost — it just wasn't being looked for. `arduino-app-cli config get` shows the directory.
+
+Fix: move the app into `~/ArduinoApps/` and leave `~/motor-control` as a **symlink** so
+existing deploy paths keep working. Do NOT "import from computer" — that creates a second
+copy that diverges from the one the deploy scripts write to.
+
+> ⚠️ Starting the app **by path** while it is also discovered via `ArduinoApps/` produces
+> **two registrations** (`./motor-control` and `user:motor-control`) for one directory.
+> App Lab then greys out **Run**, because its own entry is idle while the containers are
+> taken by the other. Keep exactly one.
+
+### App Lab needs the USB cable — but adb is fragile
+
+App Lab reaches the board over **USB**, not the network: its daemon binds `127.0.0.1:8800`
+only, and `arduino-router-serial` proxies to `ttyGS0`. Over the network you get the brick
+catalogue and the cloud Edge Impulse link (so your project appears) but **no apps**, and
+Download fails with nothing in the board's logs.
+
+⚠️ **Do not run any other `adb` while App Lab is connected.** Only one adb server can own
+the device. We ran a `adb devices` check mid-session and the device went to `offline` and
+stayed there — through a server restart, a cable replug, an `adbd` restart, *and* a full
+board reboot, for both adb 32.0.0 and 37.0.0. Root cause never confirmed; avoid the
+situation rather than trying to recover it.
+
+### Also worth knowing
+
+- The env var gating our ML path (`FARMOS_EMITTER_ML`) now **defaults ON**. App Lab
+  regenerates both compose files on every start, so there is nowhere durable to inject an
+  env var into the app container — a flag that cannot be set is a flag that is always off.
+  `FARMOS_EMITTER_ML=0` still forces the classical fallback.
+- Switching the board's WiFi mid-session changes its IP and **App Lab keeps the old one** —
+  the board then appears in the list but clicking it does nothing. Restart App Lab.
+
+---
+
 ## [Power] 12V solenoid feed CAUGHT FIRE — 20A fuse on a Dupont jumper (2026-08-15)
 
 **What happened:** the 12V feed from the terminal block to the solenoid driver board was a
@@ -322,7 +408,7 @@ ls /dev/cu.usbmodem*
 
 **Root causes found (in likelihood order):**
 1. **Robot's DHCP IP changed.** The router hands a new IP on reboot (seen at `.91`, `.204`, `.110`). A bookmark or `~/.ssh/config` pointing at an old IP silently breaks. → the #1 cause of "worked then stopped."
-2. **The test computer wasn't actually on the same WiFi.** A Mac showed `en0` with IP `.48` but `networksetup -getairportnetwork` reported "not associated," and `arp <robot-ip>` returned `(incomplete)` — no Layer-2 path. It was on a different/Ethernet/guest network, not home WiFi. The **phone on home WiFi reached the robot fine.** Lesson: test from the device that matters and confirm it's truly on the same SSID before blaming the robot.
+2. **The test computer wasn't actually on the same WiFi.** A Mac showed `en0` with IP `.48` but `networksetup -getairportnetwork` reported "not associated," and `arp <robot-ip>` returned `(incomplete)` — no Layer-2 path. It was on a different/Ethernet/guest network, not home WiFi WiFi. The **phone on home WiFi WiFi reached the robot fine.** Lesson: test from the device that matters and confirm it's truly on the same SSID before blaming the robot.
 3. **mDNS name didn't resolve** — `farm-os.local` failed because `avahi-daemon` was installed but **disabled**.
 
 **Fixes:**
@@ -331,7 +417,7 @@ ls /dev/cu.usbmodem*
   sudo systemctl enable --now avahi-daemon   # on the robot
   ```
   Then use **`http://farm-os.local:7000`** everywhere — survives IP changes. ✅ Confirmed working from phone.
-- **Backup — DHCP reservation:** in the home router admin (`http://192.168.31.1`), bind the robot's `wlan0` MAC to a fixed IP.
+- **Backup — DHCP reservation:** in the home WiFi router admin (`http://192.168.31.1`), bind the robot's `wlan0` MAC to a fixed IP.
 
 > The board + server were healthy the whole time (SSH on `:22`, server `python /app/python/main.py` in Docker on `0.0.0.0:7000`). This was purely an addressing/reachability problem — a reboot does NOT fix it.
 
@@ -374,7 +460,7 @@ It runs only one at a time. Usage:
 ## [Network] Quick field checklist (UI won't load)
 
 1. Robot powered + booted? (power LED; wait ~60s after power-on)
-2. Phone on the right WiFi — **FarmOS-AP** (field) or home-WiFi (home), **not** cellular
+2. Phone on the right WiFi — **FarmOS-AP** (field) or home WiFi (home), **not** cellular
 3. Open **`http://farm-os.local:7000`** (home WiFi) or **`http://192.168.4.1:7000`** (FarmOS-AP)
 4. Still dead? power-cycle the robot, wait ~60s, retry
 5. Deeper: connect USB and run the ADB diagnostics above
@@ -427,7 +513,7 @@ home WiFi. Either way it's on the UNO Q's network; stream at `http://<cam-ip>:81
 **"Always-on FarmOS-AP even while on home WiFi?"** Not reliable on the single radio —
 concurrent AP+STA is chip/driver-dependent (see the one-radio note above; the sanctioned
 "both at once" answer is a **2nd radio / USB WiFi dongle**). So:
-- **Demo/field = force hotspot** (`net_mode.sh hotspot` or the UI button). No home-WiFi in the
+- **Demo/field = force hotspot** (`net_mode.sh hotspot` or the UI button). No home WiFi in the
   field anyway → UNO Q + ESP32-CAM + phone all on FarmOS-AP, fully self-contained, no internet
   needed. This is the demo setup.
 - **Internet + local devices together** → add a USB WiFi dongle (one radio on home WiFi for

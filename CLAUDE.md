@@ -53,8 +53,13 @@ This file documents how the on-board pieces fit together and how to run/deploy t
   `PLANNER_AFTER` (demo date), `PLANNER_LOCATION` (weather; default `salem`).
 
 ### 3) Operator console (`console/`) — the tabbed UI
-- App Lab app on the board at `~/motor-control/` (mounted into docker `motor-control-main-1`
-  as `/app`), served at **`http://farm-os.local:7000`**. Tabs: Drive / Seed / Soil / Cam /
+- App Lab app on the board at **`~/ArduinoApps/motor-control/`** (mounted into docker
+  `motor-control-main-1` as `/app`), served at **`http://farm-os.local:7000`**.
+  `~/motor-control` is a **symlink** to it, so the paths below still work — App Lab's apps
+  directory moved to `~/ArduinoApps/` in the Aug-2026 runtime upgrade and it only discovers
+  apps there. The trained emitter model is bound in **`console/app.yaml`**
+  (`arduino:object_detection: {model: ei-model-1088852-1}`), not in the App Lab UI —
+  see `../ai-labs/apps/farm-robot/docs/farm-os/ml-emitter-model.md`. Tabs: Drive / Seed / Soil / Cam /
   **Plan** / Settings. Drive/Seed/Soil/Cam/Settings talk to the STM32 via RouterBridge RPCs
   (`python/main.py`). The **Plan tab** is pure frontend that calls the planner service at
   `http://<host>:8765` (`/api/plan` + `/api/narrate`).

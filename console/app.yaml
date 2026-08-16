@@ -1,12 +1,14 @@
 name: Farm Robot Control
-icon: 🤖
 description: Motor control web UI for the farm robot.
-
+ports: []
 bricks:
-  - arduino:web_ui
-  # Edge Impulse FOMO emitter detector. This brick has requires_container: true, so
-  # declaring it here is what makes App Lab merge its compose and start the
-  # ei-obj-detection-runner container — the model does NOT load in-process; the brick
-  # talks HTTP to that runner on port 1337. The model file itself is selected with
-  # EI_OBJ_DETECTION_MODEL (see .cache/app-compose.yaml after a restart).
-  - arduino:object_detection
+- arduino:web_ui: {}
+# The trained Edge Impulse FOMO emitter detector, bound to the app DECLARATIVELY.
+# `model:` is the id from App Lab's registry (arduino-app-cli daemon /v1/models).
+# This is what makes App Lab start ei-obj-detection-runner with OUR model instead of
+# the out-of-the-box yolo-x — and because it lives here rather than being injected by
+# the UI, it survives `arduino-app-cli app start` and a reboot. Getting this wrong is
+# silent: the app runs, the runner is healthy, and it serves 80 COCO classes.
+- arduino:object_detection:
+    model: ei-model-1088852-1
+icon: 🤖
