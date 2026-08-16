@@ -41,6 +41,56 @@ decisions, and build status.
   fallback); a small **Qwen** LLM via Ollama for the planner (run staggered, never concurrent
   with the vision model).
 
+## How the UNO Q is used
+
+The board is not a stand-in for a microcontroller with a Linux box bolted on. Both halves
+are load-bearing, and the split is what makes the seeder work.
+
+**The seeder's punch must hold for exactly 500 ms while a neural network runs on the same
+board.** On a single-processor system those two compete. Here they don't: `plantSeed` is a
+single RPC that the **STM32 executes atomically** — drum release, 100 ms settle, coil on,
+500 ms, coil off — so a busy Linux side, a garbage-collection pause, or even a dropped
+bridge cannot stretch the time a pulse-rated solenoid is energised. The Qualcomm side is
+free to be slow and thoughtful because it is not holding a stopwatch.
+
+| UNO Q capability | What depends on it |
+|---|---|
+| **STM32U585 MCU** — real-time GPIO | motor PWM, both servos, the solenoid's timed punch, soil/battery ADC. 15 RPCs: `setMotors` `stop` `plantSeed` `indexSpool` `dropSeed` `punch` `retract` `getMoisture` `getTemperature` `getEC` `getBattery` `getDiag` … |
+| **Qualcomm Linux side** — compute | the web console, path planning, the LLM planner, OpenCV, and Edge Impulse inference |
+| **RouterBridge** — the link between them | every actuator command, and `getDiag`, which reports back from the MCU what actually reached the driver pins |
+| **App Lab bricks** | `arduino:web_ui` serves the operator console; `arduino:object_detection` runs the trained model in its own container |
+| **One board, no companion** | a Raspberry Pi was considered and dropped — the UNO Q runs the LLM, the CV and the UI itself |
+
+### Two AI workloads, on the board, no network
+
+- **Act 1** — a small LLM (Gemma 2B via Ollama) presents the seeding recommendation
+- **Act 3** — an Edge Impulse **FOMO** model finds drip emitters in the camera feed
+
+Both run **on the board**; nothing calls an API. They are run **staggered, never
+concurrently** — at ~1 GB free with a model resident, and vision needing the CPU during a
+run, sharing them would starve both. The planner finishes before the robot moves.
+
+The vision model was also **trained on data this robot collected itself**: the Camera tab
+drives the drip line and saves frames, those frames are labelled and trained into a FOMO
+model, and the model is installed back onto the same board. The loop closes on one device.
+
+### Fully committed I/O
+
+The pin budget is spent: **A5 is the only free GPIO**, which is why the second solenoid
+driver shares a gate with the first and why the seeder's servos had to move to digital
+pins. That constraint drove several design decisions recorded in
+[`uno-q-wiring.md`](docs/uno-q-wiring.md).
+
+### Board behaviour we had to find the hard way
+
+Documented in [`troubleshooting.md`](docs/troubleshooting.md) in case they save someone else time:
+
+- `pinMode()` on a PWM pin **before** `analogWrite()` kills PWM on that pin (outputs ~0 V)
+- `Servo` works only on **digital** pins; A3 gives no motion at all
+- ADC full scale is **VREF+ ≈ 3.3 V**, not 5 V
+- `Servo.detach()`/`attach()` at runtime **hangs the MCU**, taking the bridge with it
+- `halt`/`poweroff` auto-restart while power is applied — only cutting power keeps it off
+
 ## Status
 Acts 2 and 4 run end-to-end on soil — multi-row serpentine seeding with a real row change,
 logged positions, and a generated farm map. The drip model is trained and verified on the

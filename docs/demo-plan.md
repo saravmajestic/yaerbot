@@ -48,26 +48,38 @@ the robot actually did.
 
 ## The Script — 4 acts
 
+> **Hardware note for each act below** — one line to say on camera. The architecture and
+> the reasoning behind it are in the [README](../README.md#how-the-uno-q-is-used).
+
 ### Act 1 — Planner (software) 🎬
 Farmer opens the **Chat tab**, says "I want to plant groundnut." Robot's on-device LLM:
 analyzes crop + climate, checks **local biodynamic calendar** (e.g. *Keel Nokku Naal*),
 pulls market/weather context, and **recommends a seeding date + spacing config**, explaining
 why.
+> 🔧 *"This model is running on the robot. There's no internet call in this answer."*
 
 ### Act 2 — Plain-land seeder (hardware + software) 🎬
 Date confirmed → farmer marks a plot (e.g. 4×8 ft, or enter dims). Robot **computes a
 boustrophedon path** for the chosen spacing and executes it with **timed dead-reckoning**,
 planting at fixed spacing, **no arm rotation**. The computed path is shown as an overlay while it runs.
+> 🔧 *"The Linux side planned this path; the microcontroller is driving it. Each punch is
+> timed by the MCU, so it stays exact no matter what the rest of the board is doing."*
+> Cut to the **Diag tab** for a few seconds — it traces one command from the browser
+> through the console to the MCU and out to the driver pins.
 
 ### Act 3 — Drip-line seeder (hardware + software) 🎬
 Plot has drip → robot uses its **custom on-device model** to find the drip line + emitters,
 **follows the lateral**, and plants **at each emitter — no rotation first** (reliable), then
 "if we're adventurous" the **rotation-per-emitter** finale. The live CV overlay (tube +
 emitter boxes) shows the model running on the board.
+> 🔧 *"This model was trained on pictures this robot took of this drip line — and it's
+> running on the same board that's driving the wheels."*
 
 ### Act 4 — Report (software) 🎬
 Seeding done → robot **generates a pictorial farm map**: plot outline, seed dots at recorded
 positions, spacing annotations, seed count, and the Act-1 rationale — closing the loop.
+> 🔧 *"Every dot is a position the robot logged as it planted it."* Real output of a
+> previous run is committed in [`../runs/`](../runs/).
 
 ---
 

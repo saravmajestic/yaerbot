@@ -168,27 +168,11 @@ def _drive_stop(src):
                      speed=_speed, at=time.time())
     Bridge.call("stop")
 
-# ARC (radial) steering — correcting drift WHILE MOVING, without stopping.
-#
-# left/right below are zero-radius PIVOTS: the wheels counter-rotate, so the robot
-# spins about its centre. That is right for turning in place at a row end, and far too
-# aggressive for nudging a drifting robot back on line — it overshoots to the other
-# side, which is exactly what happens when you tap them mid-run.
-#
-# An arc keeps BOTH wheels driving forward and just slows the inner one, so the robot
-# curves gently and keeps making progress. Lower _ARC_INNER = tighter curve.
-# Note this is also less surface-dependent than a pivot: a pivot turns by scrubbing the
-# wheels sideways, so it behaves differently on hard floor vs loose tilth, while an arc
-# is mostly rolling.
-_ARC_INNER = 0.45          # inner wheel duty as a fraction of the outer
-
 DIRECTIONS = {
-    "forward":   lambda s: trimmed( s,  s),
-    "backward":  lambda s: trimmed(-s, -s),
-    "left":      lambda s: trimmed(-s,  s),     # pivot, in place
-    "right":     lambda s: trimmed( s, -s),     # pivot, in place
-    "arc_left":  lambda s: trimmed(int(s * _ARC_INNER),  s),   # curve left, still moving
-    "arc_right": lambda s: trimmed( s, int(s * _ARC_INNER)),   # curve right, still moving
+    "forward":  lambda s: trimmed( s,  s),
+    "backward": lambda s: trimmed(-s, -s),
+    "left":     lambda s: trimmed(-s,  s),      # pivot, in place
+    "right":    lambda s: trimmed( s, -s),      # pivot, in place
 }
 
 
