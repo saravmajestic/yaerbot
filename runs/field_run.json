@@ -1,0 +1,74 @@
+{
+  "config": {
+    "crop": "groundnut",
+    "plot_w_m": 1.0,
+    "plot_l_m": 1.0,
+    "row_gap_m": 0.5,
+    "seed_gap_m": 0.5,
+    "edge_margin_m": null,
+    "speed_mps": 0.58,
+    "seeds_per_spot": 1,
+    "recommended_date": "",
+    "rationale": ""
+  },
+  "planned": [
+    [
+      0.25,
+      0.25
+    ],
+    [
+      0.25,
+      0.75
+    ],
+    [
+      0.75,
+      0.75
+    ],
+    [
+      0.75,
+      0.25
+    ]
+  ],
+  "executed": [
+    [
+      0.25,
+      0.25
+    ],
+    [
+      0.25,
+      0.75
+    ],
+    [
+      0.75,
+      0.75
+    ],
+    [
+      0.75,
+      0.25
+    ]
+  ],
+  "summary": {
+    "rows": 2,
+    "seeds_per_row": 2,
+    "spots": 4,
+    "seeds_total": 4
+  },
+  "stats": {
+    "distance_m": 1.854,
+    "est_run_time_s": 3.2,
+    "planned_spacing": {
+      "mean_gap_m": 0.5,
+      "min_gap_m": 0.5,
+      "max_gap_m": 0.5
+    },
+    "executed_spacing": {
+      "mean_gap_m": 0.5,
+      "min_gap_m": 0.5,
+      "max_gap_m": 0.5
+    },
+    "max_position_error_m": 0.0
+  },
+  "crop": "groundnut",
+  "recommended_date": "",
+  "rationale": ""
+}

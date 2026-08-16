@@ -5,6 +5,22 @@ the **Arduino UNO Q**. It acts as an end-to-end agronomic agent: it *plans* (wha
 seed), *acts* (seeds a plot — plain fixed-spacing or by following a drip line), and *reports*
 (a pictorial map of what it planted).
 
+## Why
+
+Sowing on a smallholding turns on two questions, and both are answered by hand. *When* —
+which here still follows the local panchangam and biodynamic calendar; groundnut goes in
+on **Keel Nokku Naal**. And *where* each seed lands.
+
+Hand-broadcasting over-sows to compensate for uneven placement, so seed is wasted by
+design. On drip-irrigated land the water arrives at the emitters, so a seed placed
+anywhere else is watered indirectly or not at all — which is why this robot **finds the
+emitters by sight** and seeds to them, rather than assuming a spacing. And punching one
+hole per seed disturbs far less soil than preparing a tilled seedbed.
+
+So the robot has to do the whole job rather than one slice of it: decide the date from
+local practice and real weather, place seeds accurately on either kind of land, and hand
+back a record of what it did.
+
 ## The demo (4 acts)
 1. **Planner** — an on-device LLM recommends a crop's seeding date + spacing from local
    climate, market context, and the local **biodynamic calendar** (e.g. *Keel Nokku Naal*).
@@ -26,9 +42,9 @@ decisions, and build status.
   with the vision model).
 
 ## Status
-Foundations working (drive, camera pipeline, seeder mechanism + firmware RPCs, classical CV,
-battery). The four demo acts are still being assembled end-to-end — see the status table in
-the demo plan. Code is copied in module-by-module as each act is built.
+Acts 2 and 4 run end-to-end on soil — multi-row serpentine seeding with a real row change,
+logged positions, and a generated farm map. The drip model is trained and verified on the
+board; the planner runs on-device. Full status table in the demo plan.
 
 ## Repo layout
 ```
@@ -55,7 +71,9 @@ farmos/                  hardware-free brain, testable off the robot
 
 scripts/field_test.py    field calibration + run harness (solve/tsolve, row, cycle, spool)
 tests/                   58 unit tests — run: python -m pytest
-examples/                offline demos + sample run artifacts (report.svg, runlog.json)
+examples/                offline demos — run the whole pipeline with no hardware
+runs/                    REAL artifacts off the robot: run logs, generated report,
+                         MCU per-move diagnostics, battery telemetry
 deploy/                  systemd units + install script
 docs/                    see the index below
 ```
@@ -70,6 +88,7 @@ docs/                    see the index below
 | [`ml-emitter-model.md`](docs/ml-emitter-model.md) | **the AI workflow** — capture → label → train FOMO → deploy on-device |
 | [`drive-precision.md`](docs/drive-precision.md) | open-loop drive model, calibration method, error budget |
 | [`troubleshooting.md`](docs/troubleshooting.md) | every hardware fault hit during the build, with root cause and fix |
+| [`runs/`](runs/) | **real data off the robot** — run logs, the generated farm map, MCU diagnostics, battery telemetry |
 
 ## Try it (no hardware)
 ```
