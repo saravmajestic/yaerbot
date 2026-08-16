@@ -319,7 +319,13 @@ def on_survey_stop(client, data):
 # drip mode, AND — only while the Camera tab is open — pushes annotated JPEG
 # frames to the browser over the socket at a throttled rate. The browser never
 # touches the cam directly.
-_cam = {"url": "", "w": 0, "h": 0, "tube": None, "emitter": None, "watch": 0.0}
+_cam = {"url": "", "w": 0, "h": 0, "tube": None, "emitter": None, "watch": 0.0,
+        "last_frame": 0.0}          # monotonic-ish stamp of the last SUCCESSFUL read
+# How long without a decoded frame before the stream counts as dead. The ESP32-CAM's
+# MJPEG stream can stop delivering while the socket stays open — read() then returns
+# False forever and the loop livelocks: thread alive, nothing arriving. See _cam_loop.
+_CAM_STALE_S = 5.0
+_CAM_REOPEN_TRIES = 3
 # Drip seeding (Act 3). The trigger is the CAMERA, not odometry: plant at each
 # emitter the model finds. `emitter_gap` is the operator's APPROXIMATE spacing —
 # it isn't used to place seeds, only to (a) reject a second detection of the same
@@ -427,11 +433,41 @@ def _cam_loop(url):
     print("camera loop (sole consumer): %s  [emitter: %s]"
           % (_stream_url(url), "ML/Edge-Impulse" if ml_available() else "classical CV"),
           flush=True)
+    fail_since = None
+    reopens = 0
     while _cam["url"] == url and _VISION_OK:
         ok, frame = src.read()
         if not ok:
+            # A dead MJPEG stream returns False forever while the socket stays open,
+            # so this thread would stay ALIVE but useless — and on_set_camera refused
+            # to start a replacement precisely because a thread was alive. Result:
+            # Connect did nothing, permanently (2026-08-15, seven clicks, no effect).
+            # So: reopen the stream, and if that keeps failing, DIE so Connect works.
+            fail_since = fail_since or time.time()
+            if time.time() - fail_since > _CAM_STALE_S:
+                reopens += 1
+                if reopens > _CAM_REOPEN_TRIES:
+                    log("camera stream dead and %d reopens failed — dropping the loop "
+                        "so Connect can start a fresh one" % _CAM_REOPEN_TRIES)
+                    _cam["url"] = ""          # UI shows disconnected; next Connect is clean
+                    break
+                log("camera stream stale for %.0fs — reopening (attempt %d/%d)"
+                    % (_CAM_STALE_S, reopens, _CAM_REOPEN_TRIES))
+                try:
+                    src.release()
+                except Exception:             # noqa: BLE001
+                    pass
+                try:
+                    src = FrameSource(_stream_url(url))
+                    log("camera stream reopened")
+                except Exception as e:        # noqa: BLE001
+                    log("camera reopen failed: %s" % e)
+                fail_since = time.time()      # restart the clock either way
             time.sleep(0.1)
             continue
+        fail_since = None
+        reopens = 0
+        _cam["last_frame"] = time.time()
         h, w = frame.shape[:2]
         tube = detect_tube(frame)
         moist = _moisture_min()
@@ -560,8 +596,17 @@ def _cam_loop(url):
 def on_set_camera(client, data):
     global _cam_thread
     url = data.get("url", "").strip()
-    if url == _cam["url"] and _cam_thread and _cam_thread.is_alive():
-        return                       # already streaming this url — don't spawn a duplicate loop
+    # "Alive" is NOT enough — a livelocked loop is alive and delivering nothing, and
+    # treating that as streaming is what made Connect a no-op. Require a RECENT FRAME.
+    age = time.time() - _cam.get("last_frame", 0.0)
+    alive = bool(_cam_thread and _cam_thread.is_alive())
+    streaming = alive and age < _CAM_STALE_S
+    if url == _cam["url"] and streaming:
+        return                       # genuinely streaming this url — no duplicate loop
+    if alive and not streaming:
+        log("camera loop alive but stale (no frame for %.0fs) — restarting it" % age)
+        _cam["url"] = ""             # drops the old loop out of its while condition
+        time.sleep(0.3)              # let it notice before we start the replacement
     _cam["url"] = url                # a changed url makes the old loop exit (while _cam["url"]==url)
     if url and _VISION_OK:
         _cam_thread = threading.Thread(target=_cam_loop, args=(url,), daemon=True)

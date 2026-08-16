@@ -4,3 +4,9 @@ description: Motor control web UI for the farm robot.
 
 bricks:
   - arduino:web_ui
+  # Edge Impulse FOMO emitter detector. This brick has requires_container: true, so
+  # declaring it here is what makes App Lab merge its compose and start the
+  # ei-obj-detection-runner container — the model does NOT load in-process; the brick
+  # talks HTTP to that runner on port 1337. The model file itself is selected with
+  # EI_OBJ_DETECTION_MODEL (see .cache/app-compose.yaml after a restart).
+  - arduino:object_detection
