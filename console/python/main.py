@@ -109,8 +109,10 @@ _speed = 180  # default ~70% (0-255)
 # Trim: reduce the faster side until robot goes straight.
 # Robot drifts RIGHT → right motors are faster → reduce RIGHT_TRIM.
 # Adjust in 0.05 steps and re-deploy until straight.
-LEFT_TRIM  = 0.77
-RIGHT_TRIM = 1.00
+LEFT_TRIM  = 0.83      # 2026-08-16: was 0.77; matched to the field-test `ltrim=0.83`
+RIGHT_TRIM = 1.00      # that the row/cycle runs are calibrated with. The two had
+                       # drifted apart, so the Drive tab steered differently from
+                       # field_test.py on the same ground.
 
 def trimmed(left, right):
     return int(left * LEFT_TRIM), int(right * RIGHT_TRIM)
@@ -121,10 +123,29 @@ def trimmed(left, right):
 # scripts/field_test.py (solve/tsolve). See docs/farm-os/drive-precision.md.
 # batt_comp stays off: the A4 divider still reads low and wanders.
 CAL = {
-    "pwm": 180, "speed": 0.616, "startup": 0.104,
-    "ltrim": 0.75, "rtrim": 1.00,
-    "turn_pwm": 120, "tdps": 51.0, "tstartup": -0.75, "tramp": 0.0,
+    "pwm": 180, "speed": 0.628, "startup": 0.099,
+    "ltrim": 0.83, "rtrim": 1.00,
+    "turn_pwm": 120, "tdps": 45.2, "tstartup": -0.80, "tramp": 0.0,
 }
+# Synced 2026-08-16 to the numbers actually validated on soil with field_test.py —
+# this block had drifted and the Seed tab was running stale calibration:
+#   ltrim   0.75 -> 0.83   (also matches LEFT_TRIM above; there were THREE values)
+#   speed   0.616 -> 0.628
+#   startup 0.104 -> 0.099
+#   tstartup -0.75 -> -0.80
+#   tdps    51.0 -> 45.2   <- see below, this one is not a fresh measurement
+#
+# On tdps: the operator found `turn=125` produced a correct row change on the ground,
+# validated by the two rows actually coming out parallel — better evidence than any of
+# the single-angle fits before it. turn=125 @ tdps=62.8 commands -0.80 + 125/62.8 =
+# 1.190s, so tdps = 90/(1.190+0.80) = 45.2 makes `turn=90` command that SAME 1.190s.
+# Identical motor behaviour, but the geometry stays honest, so uturn/plan/Seed-tab all
+# inherit the correction instead of each needing its own fudge.
+#
+# This is still an OPEN-LOOP timed pivot and it will keep drifting with the surface —
+# a skid-steer point turn rotates by scrubbing the wheels sideways, so hard floor and
+# loose tilth genuinely differ. The fix is closed-loop heading from a gyro, not a
+# better constant. See docs/farm-os/drive-precision.md.
 
 
 # ── Diagnostics: what THIS side last sent ──────────────────────────────────
@@ -147,11 +168,27 @@ def _drive_stop(src):
                      speed=_speed, at=time.time())
     Bridge.call("stop")
 
+# ARC (radial) steering — correcting drift WHILE MOVING, without stopping.
+#
+# left/right below are zero-radius PIVOTS: the wheels counter-rotate, so the robot
+# spins about its centre. That is right for turning in place at a row end, and far too
+# aggressive for nudging a drifting robot back on line — it overshoots to the other
+# side, which is exactly what happens when you tap them mid-run.
+#
+# An arc keeps BOTH wheels driving forward and just slows the inner one, so the robot
+# curves gently and keeps making progress. Lower _ARC_INNER = tighter curve.
+# Note this is also less surface-dependent than a pivot: a pivot turns by scrubbing the
+# wheels sideways, so it behaves differently on hard floor vs loose tilth, while an arc
+# is mostly rolling.
+_ARC_INNER = 0.45          # inner wheel duty as a fraction of the outer
+
 DIRECTIONS = {
-    "forward":  lambda s: trimmed( s,  s),
-    "backward": lambda s: trimmed(-s, -s),
-    "left":     lambda s: trimmed(-s,  s),
-    "right":    lambda s: trimmed( s, -s),
+    "forward":   lambda s: trimmed( s,  s),
+    "backward":  lambda s: trimmed(-s, -s),
+    "left":      lambda s: trimmed(-s,  s),     # pivot, in place
+    "right":     lambda s: trimmed( s, -s),     # pivot, in place
+    "arc_left":  lambda s: trimmed(int(s * _ARC_INNER),  s),   # curve left, still moving
+    "arc_right": lambda s: trimmed( s, int(s * _ARC_INNER)),   # curve right, still moving
 }
 
 

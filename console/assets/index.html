@@ -42,7 +42,15 @@
           <div class="dpad-row">
             <button class="btn-dir" data-dir="backward">&#9660;</button>
           </div>
+          <!-- Gentle course correction: both wheels keep driving forward, inner one
+               slows. Use these to nudge a drifting robot back on line — the ◀ ▶ above
+               are in-place pivots and will overshoot to the other side. -->
+          <div class="dpad-row dpad-arc">
+            <button class="btn-dir btn-arc" data-dir="arc_left" title="Curve left while moving">&#8624;</button>
+            <button class="btn-dir btn-arc" data-dir="arc_right" title="Curve right while moving">&#8625;</button>
+          </div>
         </div>
+        <p class="hint dpad-hint">&#9664;&#9654; pivot in place &middot; &#8624;&#8625; curve gently while moving (drift correction)</p>
 
         <div class="speed-section">
           <label>Speed <span id="speed-val">70</span>%</label>
