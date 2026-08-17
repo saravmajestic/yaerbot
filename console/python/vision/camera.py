@@ -35,6 +35,11 @@ class FrameSource:
             self._cap = cv2.VideoCapture(source)
             if not self._cap.isOpened():
                 raise RuntimeError("could not open source: %r" % source)
+            # NOTE: do NOT set CAP_PROP_BUFFERSIZE on this source. Tried it 2026-08-17
+            # to stop partially-decoded frames; on the ESP32-CAM's MJPEG-over-HTTP the
+            # FFmpeg backend delivered ONE frame after each open and then stalled —
+            # the loop reopened every 5s, forever. Buffered-frame staleness is the
+            # lesser problem; a stream that does not deliver is fatal.
 
     def read(self):
         """Return (ok, frame)."""
