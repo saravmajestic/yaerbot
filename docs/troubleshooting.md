@@ -88,6 +88,116 @@ situation rather than trying to recover it.
 
 ---
 
+## [Gyro/I2C] The header pins labelled SDA/SCL have NO I2C — the gyro lives on A4/A5 (2026-08-17)
+
+Fitting an MPU-6050 to close the loop on turns took a whole afternoon and six MCU
+reflashes, almost entirely because **the pins silk-screened `SDA`/`SCL` on the UNO Q
+header do not have an I2C peripheral behind them.** Recording the whole chain, because
+every wrong turn looked exactly like a wiring fault.
+
+### Why not D20/D21 (the pins actually labelled SDA/SCL)
+
+The core's own board overlay hands those pads to USART3 and leaves `i2c2` with no
+`status` and no `pinctrl`:
+
+```
+&usart3 { status = "okay"; pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>; };
+&i2c2   { zephyr,deferred-init; };      <- no status, no pinctrl: DISABLED
+```
+(`~/.arduino15/packages/arduino/hardware/zephyr/<ver>/variants/arduino_uno_q_stm32u585xx/
+arduino_uno_q_stm32u585xx.overlay`)
+
+So `Wire.begin()` succeeds, every transfer fails, and a bus scan finds nothing however
+correctly the module is wired. Matches [ArduinoCore-zephyr#301](https://github.com/arduino/ArduinoCore-zephyr/issues/301).
+
+**This cannot be patched at the bench.** The overlay is compiled into the prebuilt
+`zephyr-*.elf` that gets flashed, so editing the text does nothing without rebuilding
+Zephyr from source.
+
+**The pads still work as plain GPIO** — `gateTest(20)`/`gateTest(21)` return
+`dr_hi:1, dr_lo:0` and look perfectly healthy. That is a trap: it proves the pin drives,
+not that a peripheral is attached.
+
+### The mapping — NOT what the Arduino forum says
+
+From the overlay's `i2cs = <&i2c2>, <&i2c4>, <&i2c3>;`:
+
+| object  | peripheral | pins                     | usable |
+|---------|-----------|--------------------------|--------|
+| `Wire`  | i2c2 | D20/D21 (labelled SDA/SCL) | **NO** — disabled |
+| `Wire1` | i2c4 | Qwiic socket only          | yes, needs a JST-SH cable |
+| `Wire2` | i2c3 | **A4 / A5**                | yes, and solderable |
+
+A forum post claimed header = `Wire` and Qwiic = `Wire1`. It is wrong in both halves.
+**Read the overlay on the board, not the forum.**
+
+### So the gyro is on A4 (SDA) / A5 (SCL) via `Wire2`, and it cost three things
+
+1. **The battery divider lost A4** — `BATT_PRESENT 0`. `getBattery` now answers
+   `present:false` instead of reporting a floating pin, because a plausible-looking wrong
+   voltage is worse than none. Acceptable trade: the divider was never stable enough to
+   compensate duty with (the console has always run `batt_comp=False` and field runs pass
+   `nobatt`), whereas the turn had no other way to know what it actually did.
+   To reverse it: `BATT_PRESENT 1`, refit the 10k/2k + 100nF to A4, and move the gyro to
+   the Qwiic connector (`Wire1`) — which needs a cable.
+2. **`gateTest` must not `analogRead` A5** — `GATE_SENSE 0`. `analogRead()` RE-MUXES the
+   pad before sampling (see the gateTest entry below), so one call would take SCL away
+   from i2c3 mid-run.
+3. **`getDiag` had to stop reading A4.** This one cost the most time: `rpc_getDiag()`
+   called `readBattRaw()` unconditionally, and the console's battery logger polls
+   `getDiag` **every 2 seconds** — so the bus died again a moment after every
+   `Wire2.begin()`. Symptom: a correctly-wired sensor that scans clean exactly zero
+   times. Both call sites are now `#if BATT_PRESENT`.
+
+### Power it from 5V, not 3V3
+
+The GY-521 feeds VCC into an **onboard 3.3V regulator**, which needs headroom. Powered
+from the UNO Q's `+3V3`, the module's rail — and therefore its pull-ups — measured
+**2.14V**. The STM32's guaranteed logic-high threshold is ~0.7 x 3.3 = **2.31V**, so
+idle-high never registered as high and I2C could not start. The vendor spec confirms
+`Input power supply 5V`. UNO Q header pins are 5V tolerant (only A0/A1 are not).
+
+### Diagnosing a dead I2C bus without a meter: `i2cLines`
+
+Reads each pad floating, then with the MCU's internal pull-up. The **pair** identifies the
+fault; either reading alone is ambiguous:
+
+| float | pull-up | meaning |
+|-------|---------|---------|
+| 1 | 1 | external pull-up present — the module is connected |
+| 0 | 1 | no external pull-up: that wire is not reaching the module's pin, **or** the rail is below V_IH (the 2.14V case) |
+| 0 | 0 | pad held down — short to GND, or something else still on the pin |
+
+Write this before theorising. It would have saved three of the six reflashes.
+
+### The module is not really an MPU-6050
+
+`WHO_AM_I` reads **0x74**. A genuine MPU-6050 returns **0x68**, because that register
+contains the device's own I2C address bits (`110100` for AD0=0) — so 0x74 at address 0x68
+is self-inconsistent. The vendor page for this board says outright: *"This board will
+function as MPU6500."* Consequences:
+
+- Gyro registers and the sensitivity scale factors (131 / 65.5 / 32.8 / 16.4 LSB per
+  deg/s for FS_SEL 0..3) are the same, so the code works.
+- **`GYRO_CONFIG[1:0]` is `FCHOICE_B` on the 6500** (reserved on a real 6050). Non-zero
+  BYPASSES the DLPF and runs the gyro at 8/32kHz, undoing the anti-aliasing. Keep them 0
+  — `0x08` does.
+- The 6500 is **more** vibration-sensitive than the 6050 (vendor's own comparison), so the
+  on-chip DLPF matters more, not less.
+- Never assume the sensitivity: `imuBegin()` reads `GYRO_CONFIG` back and scales from the
+  FS_SEL the chip reports. `gspin` measures the true scale against a hand-turned 360.
+
+### Vibration settings that matter (any IMU on this robot)
+
+- **+/-500 dps** full scale, not the +/-250 default: a vibration spike that CLIPS becomes
+  asymmetric noise and integrates into real error, while unclipped vibration averages out.
+- **DLPF_CFG = 3** (44Hz): filtered ON-CHIP, i.e. before sampling. Without it, motor and
+  gearbox vibration aliases down into what looks like genuine slow rotation.
+- **Re-sample bias standing still immediately before every pivot.** Bias drifts with
+  temperature and cannot be measured while the motors run.
+
+---
+
 ## [Power] 12V solenoid feed CAUGHT FIRE — 20A fuse on a Dupont jumper (2026-08-15)
 
 **What happened:** the 12V feed from the terminal block to the solenoid driver board was a

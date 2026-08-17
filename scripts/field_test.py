@@ -13,6 +13,18 @@ Calibration (do this first, on the pack you'll run on):
                               firmware has CURRENT_SENSE wired. Text log: arduino-app-cli monitor
   fwd  <pwm> <secs> [ltrim]   drive straight → measure distance (m)
   turn <pwm> <secs> [dir]     turn in place  → measure angle (deg); dir = left|right
+  gyro [n]                    MPU-6050 check: alive? and how much RESIDUAL rate is left
+                              after removing bias — that times the turn length is the
+                              error integration will accumulate. Robot must be STILL.
+  gspin <secs> [actual_deg]   SCALE CHECK, motors off: integrate while YOU turn the robot
+                              by hand through a known angle (use 360 — far easier to call
+                              than 90). Pass the actual angle and it prints the corrected
+                              lsb_per_dps. Isolates sensitivity from skid and coast.
+  gscale <lsb_x1000>          apply a scale factor at runtime (lost on reboot; bake the
+                              confirmed value into the firmware afterwards)
+  gturn <deg> [n] [dir] [pwm] CLOSED-LOOP turn: pivot until the gyro says it got there,
+                              then print commanded vs achieved. Repeat n times to see the
+                              spread — a steady offset is coast, a wide spread is SKID.
   solve  <t1> <d1> <t2> <d2>  two fwd runs (long + short)  → prints speed= and startup=
   tsolve <t1> <a1> <t2> <a2>  two turn runs (long + short) → prints tdps= and tstartup=
                               (measure turns against a floor tape strip; a 3/4 or full
@@ -92,6 +104,20 @@ def volts(B) -> str:
         return f"{float(r['volts']):.2f}V ({r.get('pct', '?')}%)"
     except Exception as e:
         return f"? ({e})"
+
+
+def _jsonrpc(B, name, *a, timeout=None):
+    """Call an RPC that answers with a JSON *string* over the bridge, return a dict.
+
+    `timeout` matters for the BLOCKING RPCs. Bridge.call defaults to 10s, and gyroIntegrate
+    holds the MCU for its whole window (plus a bias sample), so a 12s spin raised
+    TimeoutError while the turn itself was running perfectly well.
+    """
+    import json
+    r = B.call(name, *a, timeout=timeout) if timeout else B.call(name, *a)
+    if isinstance(r, (bytes, bytearray)):
+        r = r.decode()
+    return json.loads(r) if isinstance(r, str) else r
 
 
 def diag(B):
@@ -229,6 +255,98 @@ def main() -> None:
         B.call("setMotors", left, right); time.sleep(secs); B.call("stop")
         print(f"turn {d} pwm={pwm} for {secs}s — measure the angle (deg); tdps = angle/{secs}")
         print(diag_line(_tag(diag(B), (left, right))))
+
+    elif m == "gyro":
+        # Is the MPU-6050 alive, and is its residual small enough to integrate?
+        #   bias_dps  — zero-rate offset, removed before integration (any value is fine)
+        #   mean_dps  — what is LEFT after removing it. This is the number that matters:
+        #               it is the drift rate, so mean x turn_seconds = degrees of error.
+        #   peak_dps  — worst single sample; vibration shows up here, not in the mean.
+        B = bridge()
+        for i in range(int(args[0]) if args else 1):
+            r = _jsonrpc(B, "getGyro")
+            if not r.get("ok"):
+                print("gyro NOT responding: whoami=%s  %s" % (r.get("whoami"), r.get("err", "")))
+                print("  check: module on +3V3 (not 5V), SDA->D20, SCL->D21, AD0->GND")
+                break
+            drift = r["mean_dps"] * 2.0          # a pivot lasts about two seconds
+            print("gyro ok (whoami=0x%02X)  bias %+.3f  residual %+.3f dps  peak %+.3f  "
+                  "-> ~%.1f deg of drift over a 2s turn"
+                  % (r["whoami"], r["bias_dps"], r["mean_dps"], r["peak_dps"], abs(drift)))
+            if abs(drift) > 5:
+                print("  WARNING residual is large — is the robot completely still?")
+            if i:
+                time.sleep(0.5)
+
+    elif m == "gspin":
+        # SCALE FACTOR, isolated. Motors never run — you turn the robot by hand through a
+        # known angle. A full 360 against a floor mark is far easier to call accurately
+        # than 90 deg (same reasoning as tsolve), and it removes skid, coast and PWM from
+        # the measurement entirely, leaving only sensitivity.
+        secs = float(args[0]) if args else 10.0
+        actual = float(args[1]) if len(args) > 1 else None
+        B = bridge()
+        print("hold the robot STILL — sampling bias...")
+        # +8s of headroom: the MCU blocks for the whole window and cannot service
+        # the bridge until it returns.
+        r = _jsonrpc(B, "gyroIntegrate", int(secs * 1000), timeout=secs + 8)
+        if not r.get("ok"):
+            print("  FAILED:", r.get("err")); return
+        print("  integrated %+.1f deg (|%.1f|) over %.1fs, peak %+.1f dps, %d samples"
+              % (r["signed_deg"], r["abs_deg"], secs, r["peak_dps"], r["samples"]))
+        if actual:
+            ratio = abs(r["signed_deg"]) / actual
+            new = r["lsb_per_dps"] * ratio
+            print("  reported %.1f vs actual %.1f -> reads %.3fx reality" % (
+                abs(r["signed_deg"]), actual, ratio))
+            print("  lsb_per_dps should be %.1f (currently %.1f)" % (new, r["lsb_per_dps"]))
+            print("  apply it now (until reboot):  gscale %.0f" % (new * 1000))
+        else:
+            print("  now re-run with the angle you actually turned it through, e.g.")
+            print("    gspin %g 360" % secs)
+
+    elif m == "gscale":
+        # Apply a scale factor without reflashing. Bake the confirmed value into the
+        # firmware afterwards — this does not survive a reboot.
+        B = bridge()
+        print(_jsonrpc(B, "setGyroScale", int(float(args[0]))))
+
+    elif m == "gturn":
+        # CLOSED-LOOP turn: pivot until the gyro says we got there, and report the skid.
+        #   gturn 90            one 90 deg right turn
+        #   gturn 90 4          four of them, to see run-to-run spread
+        #   gturn 90 4 left
+        deg = float(args[0]) if args else 90.0
+        n = int(args[1]) if len(args) > 1 else 1
+        d = args[2] if len(args) > 2 else "right"
+        pwm = int(args[3]) if len(args) > 3 else 120
+        B = bridge()
+        print("battery before:", volts(B))
+        print(f"pivotDeg {deg:g} deg {d} at pwm {pwm}, x{n} — closed on the gyro")
+        errs = []
+        for i in range(n):
+            r = _jsonrpc(B, "pivotDeg", int(deg), pwm,
+                         1 if d == "right" else 0, timeout=15)
+            if not r.get("ok"):
+                print("  FAILED: %s" % r.get("err")); break
+            errs.append(r["achieved"] - deg)
+            print("  %d: target %5.1f  achieved %5.1f  err %+5.1f  %4dms  avg %5.1f dps  "
+                  "coast used %4.1f seen %4.1f -> next %4.1f  judder %+4.1f%s"
+                  % (i + 1, r["target"], r["achieved"], r["err_deg"], r["ms"],
+                     r.get("avg_dps", 0), r.get("coast_used", 0), r.get("coast_seen", 0),
+                     r.get("coast_next", 0), r.get("judder_deg", 0),
+                     "  TIMEOUT" if r.get("timeout") in (True, "true") else ""))
+            time.sleep(1.0)
+        if errs:
+            print("  spread: mean %+.1f deg, worst %+.1f deg over %d turn(s)"
+                  % (sum(errs) / len(errs), max(errs, key=abs), len(errs)))
+            print("  (a consistent OFFSET is coast to trim in firmware; a wide SPREAD")
+            print("   is skid, which is exactly what the closed loop is for)")
+            print("  judder = |rate| integral minus signed integral. Large means the pivot")
+            print("  is shaking, so the chassis is oscillating rather than turning cleanly.")
+            print("  coast is LEARNED: it releases at target-coast, measures the real coast")
+            print("  through the stop, and carries it forward — so err should shrink over")
+            print("  the first turn or two and then stay put on that surface.")
 
     elif m in ("solve", "tsolve"):
         # x = rate * (t - dead_time) for both runs -> solve the two unknowns.
