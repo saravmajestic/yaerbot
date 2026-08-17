@@ -30,7 +30,7 @@ try:
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
     import cv2  # noqa: F401
-    from vision.vision import detect_tube, detect_emitter, draw_overlay
+    from vision.vision import detect_tube, detect_emitter, detect_crossing, draw_overlay
     from vision.camera import FrameSource
     # Optional on-device ML emitter model (Edge Impulse via the object_detection
     # brick). Self-guards; falls back to classical detect_emitter if no model.
@@ -126,6 +126,7 @@ CAL = {
     "pwm": 180, "speed": 0.628, "startup": 0.099,
     "ltrim": 0.83, "rtrim": 1.00,
     "turn_pwm": 120, "tdps": 45.2, "tstartup": -0.80, "tramp": 0.0,
+    "creep": None,      # m/s at _BASE_PWM (tube-following). None -> see _DRIP_SPEED_MPS
 }
 # Synced 2026-08-16 to the numbers actually validated on soil with field_test.py —
 # this block had drifted and the Seed tab was running stale calibration:
@@ -357,9 +358,70 @@ _CAM_REOPEN_TRIES = 3
 # `angles` are ARM POSITIONS to plant at, in order. Each one drops 2 seeds (the
 # two outlets are 180 deg apart and one solenoid fires both), so [0, 90] plants a
 # 4-seed cross per emitter: 0/180, then rotate, then 90/270.
-_drip = {"emitter_gap": 0.40, "angles": [0, 90]}
-_ARM_DWELL_S  = 0.6      # let the spool servo reach the angle before dropping
-_MIN_REPLANT_M = 0.08    # anti-flicker floor only; NOT the emitter spacing
+_drip = {"emitter_gap": 0.40, "angles": [0, 90],
+         # Multi-lateral (Act 3 extension). laterals=1 keeps the original behaviour:
+         # one row, then done. >1 makes the robot SEARCH for the next lateral rather
+         # than compute where it should be — turn off the row, drive across until the
+         # camera sees a crossing tube, turn onto it. That needs no row spacing and no
+         # assumption that the laterals are parallel, which real drip layouts rarely are.
+         "laterals": 1}
+# Between-lateral search tuning.
+_TRAVERSE_MIN_M   = 0.10   # ignore crossings until this far off the old row.
+                           # WAS 0.60, as a guard against re-latching onto the lateral we
+                           # just left. It cost us the row change on 2026-08-17: the real
+                           # next lateral was seen at 0.34m and 0.53m, steady and strong,
+                           # and BOTH were discarded as "still inside min-traverse" — the
+                           # robot then turned onto something at 0.82m. Two reasons this
+                           # is now 0.10:
+                           #   * the distance it gates on is time x an unmeasured creep
+                           #     speed, so it is not trustworthy at this scale anyway;
+                           #   * the guard has never actually been needed. After the
+                           #     90 deg turn the old row is behind the robot, and every
+                           #     run logs found=False for the first samples (0.00m, 0.17m)
+                           #     — the camera looks ahead and simply does not see it.
+                           # 0.10 keeps a floor against detecting the old row in the very
+                           # first frames while the robot is still sitting on it.
+_TRAVERSE_NEAR    = 0.60   # `nearness` at which the tube is close enough to turn onto
+# TURN ON APPROACH, NOT ON A SINGLE GOOD FRAME. The 03:33 run detected crossings at
+# nearness 0.53, 0.39, 0.91, then 0.08, 0.06, 0.19 and never turned: the old rule wanted
+# three CONSECUTIVE frames agreeing within 40px, and one dropped frame reset the count to
+# zero every time. But a lateral the robot is driving towards has a signature no soil
+# artefact has — it moves steadily DOWN the frame. So instead of demanding consecutive
+# agreement, keep a short history and require the trend: several sightings within a couple
+# of seconds whose y has grown. Dropouts no longer reset anything; they just thin the
+# history.
+_TRAVERSE_TRACK_S     = 2.5   # how much sighting history counts as "recent"
+_TRAVERSE_MIN_SIGHTS  = 4     # sightings needed inside that window
+_TRAVERSE_APPROACH_PX = 25    # y must have grown by this much across the window
+_ARM_DWELL_S  = 0.6
+# plantSeed on the MCU is drop(500) + settle(100) + punch(500) + fill(400) = 1.5s.
+# A dry run sleeps the same so its timing matches a real run.
+_PLANT_SIM_S  = 2.0      # let the spool servo reach the angle before dropping
+_MIN_REPLANT_M = 0.08    # absolute floor; see _min_replant() for the run-time value
+
+
+def _min_replant():
+    """Distance that must pass before the NEXT emitter can be planted.
+
+    Still not a trigger — the model decides where emitters are, and a missed one just
+    means the next is found normally. This only stops ONE emitter being counted twice,
+    which the 03:33 run did: stops at 2.73m and 2.84m, 11cm apart on a line whose
+    emitters sit 40cm apart, because the emitter left the frame during a tube dropout
+    and re-armed on the way back in. Half the operator's spacing is comfortably below
+    any real gap and comfortably above that.
+    """
+    gap = float(_drip.get("emitter_gap") or 0.0)
+    return max(_MIN_REPLANT_M, 0.5 * gap)
+
+
+def _traverse_max():
+    """How far to search for the next lateral before giving up.
+
+    Was a flat 4.0m, which at the current speed estimate is nearly 6m of real ground —
+    the robot drives that far with nothing in view, which reads as a runaway. The
+    operator has already told us how far apart the rows are, so allow three of them.
+    """
+    return max(1.5, 3.0 * float(_plot.get("row_gap") or 0.7))
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
 _WATCH_TTL   = 2.0                 # keep pushing this long after the last get_vision poll
@@ -372,11 +434,132 @@ _CAP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "captur
 _capture = {"on": False, "interval": 2.0, "count": 0, "last": 0.0}
 
 # drip-follow tunables (mirror vision/tube_follow.py)
-_BASE_PWM, _STEER_GAIN, _EMIT_CONF, _EMIT_COOLDOWN = 77, 10, 0.55, 3.0
-# Tube-following creeps at _BASE_PWM, well below the PWM the drive was calibrated
-# at, so scale the measured cruise speed by the duty ratio for the distance guard.
-# Rough on purpose: it only has to tell 'same emitter' from 'the next one'.
-_DRIP_SPEED_MPS = CAL["speed"] * (_BASE_PWM / CAL["pwm"])
+_BASE_PWM, _STEER_GAIN, _EMIT_CONF, _EMIT_COOLDOWN = 77, 6, 0.55, 3.0
+# WHERE in frame the emitter must be before we stop for it. The camera looks down AND
+# ahead, so an emitter first appears near the TOP of the frame — a metre or more away.
+# Confidence alone as the trigger meant the robot stopped the instant each emitter
+# entered view, at a different distance every time, and would have dropped seed nowhere
+# near the emitter. Lower in frame = nearer, so hold off until the detection's centre is
+# below this fraction of the frame height.
+_EMIT_MIN_Y_FRAC = 0.55
+
+
+def _emitter_in_reach(emit, h):
+    """True when the detected emitter is near enough to be under the seeder."""
+    pos = emit.get("position")
+    if not pos or not h:
+        return False
+    return pos[1] >= h * _EMIT_MIN_Y_FRAC
+# Steering, retuned 2026-08-17 after a field run oscillated badly — corrections swung
+# +2.9 / -1.0 / +0.2 / -2.0 / -3.2 within a couple of seconds, losing the tube about
+# twice a second. Two faults, opposite in sign:
+#
+#   TOO WEAK at small error — a correction of 0.3 asks for 3 PWM of differential on a
+#   base of 77. That does not overcome stiction on soil, so the robot drifts, doing
+#   nothing, until the error is large.
+#   TOO STRONG at large error — 10 x correction at ~10 fps (the ML detector costs a
+#   ~70-90ms round trip) overshoots past centre, and P-only control with that much lag
+#   turns drift into a limit cycle.
+#
+# So: lower the proportional gain, add a floor that actually moves the robot, and use
+# the tube's TILT as a damping term. detect_tube has always returned `angle_deg` and
+# nothing ever read it — steering on position alone is why it hunts. Tilt says whether
+# we are converging or diverging, which is the derivative term this loop lacked.
+_STEER_MIN_DIFF = 11    # PWM differential floor once past the deadband (beats stiction)
+_STEER_DEADBAND = 0.25  # ignore correction noise below this — do not chase pixels
+_STEER_ANG_GAIN = 0.0   # DISABLED 2026-08-17: tilt damping made steering WORSE in
+                        # the field. The sign convention of detect_tube's angle_deg
+                        # was never verified against the robot, and a wrong-signed
+                        # derivative term amplifies the hunting it was meant to damp.
+                        # Do not re-enable without checking the sign on hardware.
+
+
+# ── Temporal gate on the tube reading ────────────────────────────────────────
+# A per-frame detector, however good, cannot rule out a reading that is physically
+# impossible. The 2026-08-17 run logged the tube at x = 233, 290, 158, 61, 256, 168,
+# 14 within about two seconds — the robot creeps at ~0.2 m/s and cannot cross the frame
+# in 100ms, so most of those were false whatever the detector said. This keeps the last
+# accepted column and rejects anything that jumps further than the robot could have
+# moved; after enough consecutive rejections it gives up and re-acquires, so a genuine
+# re-acquisition after losing the tube still works.
+_TRACK_MAX_JUMP_PX = 70     # per frame at ~10fps; a real tube drifts, it does not teleport
+_TRACK_RELOCK_N    = 6      # consecutive rejects before believing the new position
+_TRACK_STALE_S     = 1.5    # no accepted reading for this long -> accept the next one
+# PLAUSIBLE FOR THIS CAMERA. The detector reports what the profile says; how wide the
+# tube can look from this camera at this height is the robot's knowledge, not the
+# detector's. Measured across every real following frame: 38, 40, 46, 46, 62, 68, 70,
+# 70, 78 px. The false positive that sent the alignment loop chasing bare soil on
+# 2026-08-17 was 20px. The gap is wide enough to gate on and it costs nothing.
+_TUBE_MIN_W_PX   = 30
+_TUBE_MIN_SIGMA  = 2.5
+_track = {"x": None, "rejects": 0, "last_ok": 0.0}
+
+
+def _tube_plausible(tube):
+    """Is this reading the right SHAPE to be our tube, seen from our camera?"""
+    return (tube["found"] and (tube["width"] or 0) >= _TUBE_MIN_W_PX
+            and tube["strength"] >= _TUBE_MIN_SIGMA)
+
+
+def _track_reset():
+    _track.update(x=None, rejects=0, last_ok=0.0)
+
+
+def _track_tube(tube, w, now):
+    """Accept, reject or re-acquire this frame's tube reading."""
+    if not _tube_plausible(tube):
+        _track["rejects"] = 0            # nothing to disagree with; do not count it
+        out = dict(tube)
+        if tube["found"]:                # found, but not tube-shaped: say so
+            out.update(found=False, correction=0.0, implausible=True)
+        return out
+    x = tube["tube_x"]
+    prev = _track["x"]
+    stale = (now - _track["last_ok"]) > _TRACK_STALE_S
+    if prev is None or stale or abs(x - prev) <= _TRACK_MAX_JUMP_PX \
+            or _track["rejects"] >= _TRACK_RELOCK_N:
+        _track.update(x=x, rejects=0, last_ok=now)
+        return tube
+    _track["rejects"] += 1
+    out = dict(tube)
+    out.update(found=False, correction=0.0, rejected_x=x,
+               reject_run=_track["rejects"])
+    return out
+
+
+def _steer(tube):
+    """Differential PWM for the current tube reading. Position + tilt damping."""
+    c = tube.get("correction") or 0.0
+    if abs(c) < _STEER_DEADBAND:
+        c = 0.0
+    d = _STEER_GAIN * c
+
+    # Tilt: detect_tube now returns SIGNED tilt from vertical (0 = aligned), so no
+    # conversion. It says which way the robot is heading off BEFORE the offset has
+    # grown — the early warning position feedback alone cannot give.
+    a = tube.get("angle_deg")
+    if a is not None:
+        d += _STEER_ANG_GAIN * max(-45.0, min(45.0, a))
+
+    if d and abs(d) < _STEER_MIN_DIFF:                 # floor, so small errors DO move it
+        d = _STEER_MIN_DIFF if d > 0 else -_STEER_MIN_DIFF
+    return int(max(-60, min(60, d)))                   # cap: never reverse a wheel
+# Tube-following creeps at _BASE_PWM, well below the PWM the drive was calibrated at.
+# Scaling the calibrated cruise speed by the duty ratio (0.628 * 77/180 = 0.269 m/s)
+# OVER-reports badly: a run told to cover 5 m declared itself finished after about 3 m
+# of real ground. Speed is not linear in PWM — near the deadband most of the duty goes
+# into overcoming stiction, not into motion.
+#
+# Two runs have now calibrated it by observation, and they disagreed because the robot
+# was stuttering — every tube dropout costs acceleration time, so the effective speed
+# depended on how badly the detector was misbehaving that run:
+#     assumed 0.269 -> commanded 5m, covered ~3m  => ~0.161 m/s
+#     assumed 0.161 -> commanded 5m, covered ~7m  => ~0.225 m/s   (steady following)
+# The second is from the run where the tube was actually being tracked, so it is the
+# better number. It is still an observation, not a measurement. MEASURE IT:
+#     ssh unoq 'python3 ~/motor-control/scripts/field_test.py fwd 77 10 0.83'
+#     creep = (metres the robot actually moved) / 10   -> put it in CAL["creep"]
+_DRIP_SPEED_MPS = CAL.get("creep") or 0.225
 
 def _moisture_min():
     try:
@@ -444,6 +627,15 @@ def _cam_loop(url):
     armed = True                # detection-edge debounce (see the drip branch)
     driving_since = None        # when the current drive segment began
     tube_seen = None            # last tube["found"], for EDGE logging (None = no edge yet)
+    # Multi-lateral drip state. phase: "follow" (down a row) | "traverse" (crossing to
+    # the next one). `lateral` is 0-based and also picks the turn direction, so the
+    # path serpentines instead of circling.
+    phase = "follow"
+    lateral = 0
+    traversed = 0.0
+    cross_hist = []             # recent crossing sightings: (time, tube_y)
+    last_cross_log = 0.0
+    prev_run_state = None       # to detect a FRESH run and reset per-run counters
     last_push = 0.0
     push_interval = 1.0 / _BROWSER_FPS
     try:
@@ -459,6 +651,17 @@ def _cam_loop(url):
     while _cam["url"] == url and _VISION_OK:
         ok, frame = src.read()
         if not ok:
+            # NO FRAME = NO EYES. Stop the motors before anything else.
+            # This branch used to `continue` straight past the drive logic, which
+            # left the LAST setMotors command running: on 2026-08-16 a stream that
+            # went stale mid-run drove the robot blind for 22s, past its stop
+            # distance, because `travelled` also only accumulates below. Same
+            # fail-safe as "tube lost -> stop", one level lower down.
+            if _run["state"] == "running" and _run["mode"] in ("scan", "drip"):
+                if driving_since is not None:
+                    log("camera stopped delivering frames mid-run — STOPPING (blind)")
+                _drive_stop("cam-lost")
+                driving_since = None
             # A dead MJPEG stream returns False forever while the socket stays open,
             # so this thread would stay ALIVE but useless — and on_set_camera refused
             # to start a replacement precisely because a thread was alive. Result:
@@ -490,7 +693,7 @@ def _cam_loop(url):
         reopens = 0
         _cam["last_frame"] = time.time()
         h, w = frame.shape[:2]
-        tube = detect_tube(frame)
+        tube = _track_tube(detect_tube(frame), w, now=time.time())
         moist = _moisture_min()
         # ML emitter model first (the Physical-AI showcase); fall back to
         # classical detect_emitter if no model is deployed / inference fails.
@@ -506,12 +709,25 @@ def _cam_loop(url):
             _save_capture(frame)
             _capture["last"] = now
 
+        # A run just STARTED — reset every per-run counter. These live in the loop
+        # (not in _run) because the loop owns them, so on_run_start cannot clear them.
+        # Without this a second run resumed the previous run's travelled distance and,
+        # worse, could start mid-traverse.
+        if _run["state"] == "running" and prev_run_state != "running":
+            phase, lateral, travelled, traversed = "follow", 0, 0.0, 0.0
+            cross_hist = []
+            _track_reset()
+            last_plant_at, armed, driving_since = -1e9, True, None
+        prev_run_state = _run["state"]
+
         # Tube found/lost EDGE logging. Logging every frame would flood at frame rate,
         # but logging nothing left "the robot moved 5cm and stopped" with no trace at
         # all in the log (2026-08-15) — the stall was invisible. So: log the two
         # transitions only, and only while a follow-run is active, otherwise an idle
         # camera would chatter every time something passes in front of it.
-        _following = _run["state"] == "running" and _run["mode"] in ("scan", "drip")
+        _following = (_run["state"] == "running"
+                      and (_run["mode"] == "scan"
+                           or (_run["mode"] == "drip" and phase == "follow")))
         if not _following:
             tube_seen = None                  # next run starts clean, logs its first edge
         elif tube["found"] != tube_seen:
@@ -532,9 +748,8 @@ def _cam_loop(url):
             # dataset with near-duplicate frames of whatever it stopped in front of.
             # Ends only when the operator presses Stop, or if the tube is lost.
             if tube["found"]:
-                c = tube["correction"]
-                l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
-                               int(_BASE_PWM - _STEER_GAIN * c))
+                d = _steer(tube)
+                l, r = trimmed(_BASE_PWM + d, _BASE_PWM - d)
                 _drive(max(0, min(255, l)), max(0, min(255, r)), "scan", "forward")
                 if driving_since:
                     travelled += (now - driving_since) * _DRIP_SPEED_MPS
@@ -543,15 +758,108 @@ def _cam_loop(url):
                 _drive_stop("scan")          # lost the tube — don't drive blind
                 driving_since = None
 
+        elif _run["mode"] == "drip" and _run["state"] == "running" and phase == "traverse":
+            # BETWEEN LATERALS: drive across the rows looking for the next tube.
+            # NOTE the search is NOT a workaround for a bad pivot — the turn is closed on
+            # the gyro now and lands within a degree. It exists because real drip layouts
+            # are not parallel or evenly spaced, so where the next lateral IS cannot be
+            # computed from a heading and a row gap however accurate the heading is.
+            # detect_crossing() is detect_tube with the angle filter inverted — the
+            # next lateral arrives near-HORIZONTAL, which detect_tube throws away.
+            cross = detect_crossing(frame)
+            if driving_since:
+                traversed += (now - driving_since) * _DRIP_SPEED_MPS
+
+            # APPROACH, not a single good frame. Keep recent sightings and ask whether
+            # the thing is coming towards us — a lateral we are driving at moves steadily
+            # DOWN the frame, soil artefacts do not. Dropouts thin this history instead
+            # of resetting a counter, which is what kept the old rule from ever firing.
+            far_enough = traversed >= _TRAVERSE_MIN_M
+            if cross["found"]:
+                cross_hist.append((now, cross["tube_y"]))
+            cross_hist = [s for s in cross_hist if now - s[0] <= _TRAVERSE_TRACK_S]
+            grew = (cross_hist[-1][1] - cross_hist[0][1]) if len(cross_hist) >= 2 else 0.0
+            approaching = (len(cross_hist) >= _TRAVERSE_MIN_SIGHTS
+                           and grew >= _TRAVERSE_APPROACH_PX)
+            arrived = cross["found"] and cross["nearness"] >= _TRAVERSE_NEAR
+
+            # SAY WHAT WE SEE. A field run drove over two real laterals and reported
+            # only "no next lateral found" — no way to tell whether the detector saw
+            # nothing, or saw them and rejected them. Logged ~1/s so the next run
+            # produces numbers to tune against.
+            if now - last_cross_log >= 1.0:
+                last_cross_log = now
+                log("  traverse %.2fm | found=%s y=%s near=%.2f w=%s s=%.1f %s | "
+                    "sights=%d grew=%+.0fpx%s"
+                    % (traversed, cross["found"], cross["tube_y"], cross["nearness"],
+                       cross["width"], cross["strength"], cross["polarity"] or "-",
+                       len(cross_hist), grew,
+                       "" if far_enough else "  (still inside min-traverse)"))
+
+            if far_enough and approaching and arrived:
+                _drive_stop("drip")
+                turn_right = (lateral % 2 == 0)       # same way as the first turn
+                pre = _save_named(frame, "lat%d_found" % (lateral + 2))
+                log("next lateral found after %.2fm (nearness %.2f, y=%s, w=%s, "
+                    "%.1f sigma %s) — turning on [decision frame %s]"
+                    % (traversed, cross["nearness"], cross["tube_y"], cross["width"],
+                       cross["strength"], cross["polarity"], pre))
+                reached = _arrive_over_lateral(src)   # get the pivot axis ONTO the tube
+                log("  arrived over the lateral (nearness reached %.2f, then %.2fm "
+                    "of camera lookahead) — pivoting %s"
+                    % (reached, _ARRIVE_EXTRA_M, "right" if turn_right else "left"))
+                _track_reset()                        # new row: do not gate on the old x
+                _turn_onto_tube(src, turn_right, "lat%d" % (lateral + 2))
+                lateral += 1
+                phase = "follow"
+                travelled = 0.0
+                last_plant_at = -1e9                  # first emitter of a row is never gated
+                armed = True
+                driving_since = None
+                _emit_run()
+            elif traversed >= _traverse_max():
+                _drive_stop("drip")
+                _run["state"] = "done"
+                _run["msg"] = ("no next lateral found within %.1fm — stopped after %d "
+                               "lateral(s), %d emitters"
+                               % (_traverse_max(), lateral + 1, _run["planted"]))
+                log(_run["msg"])
+                _emit_report(_drip_runlog())
+                _emit_run()
+            else:
+                _drive(*trimmed(_BASE_PWM, _BASE_PWM), "drip", "forward")
+                driving_since = now
+
         elif _run["mode"] == "drip" and _run["state"] == "running":
-            detected = emit["detected"] and emit["confidence"] >= _EMIT_CONF
+            # "Detected" for the purpose of STOPPING means confident AND near — an
+            # emitter seen at the top of the frame is metres away (see _EMIT_MIN_Y_FRAC).
+            in_view  = emit["detected"] and emit["confidence"] >= _EMIT_CONF
+            detected = in_view and _emitter_in_reach(emit, h)
             # Debounce on the DETECTION EDGE, not on an assumed spacing: the model is
             # what finds emitters, so "this one again" means "still in view". Re-arm
-            # once it clears. _MIN_REPLANT_M is only a floor against flicker, well
-            # below any real spacing — the operator's spacing figure never gates a
-            # plant, so a missed emitter just means the next one is found normally.
-            if detected and armed and travelled - last_plant_at >= _MIN_REPLANT_M:
+            # once it clears the frame entirely (in_view, not detected — otherwise the
+            # same emitter re-arms the moment it drops below the reach line and gets
+            # planted twice). _min_replant() is only a floor against double-counting one
+            # emitter — it never TRIGGERS a plant, so a missed emitter simply means the
+            # next one is found normally.
+            if not in_view:
+                armed = True
+
+            if not tube["found"]:
+                # NO TUBE IN VIEW -> STOP, whatever else is happening this frame.
+                # This used to be the last `else` of an if/elif chain, so a frame with
+                # an emitter detected-and-armed but inside the re-plant floor matched
+                # NO branch: no drive call, no stop call, and the previous setMotors
+                # stayed latched. The robot drove on with nothing in view until the
+                # operator hit Stop. Stopping is now decided first, not last.
                 _drive_stop("drip")
+                driving_since = None
+            elif detected and armed and travelled - last_plant_at >= _min_replant():
+                _drive_stop("drip")
+                # THE frame this stop was taken on, kept so a run can be audited after
+                # the fact: was it a real emitter, and was the robot actually on top of
+                # it? A confidence number in a log line cannot answer either.
+                shot = _save_named(frame, "emit%d_lat%d" % (_run["planted"] + 1, lateral + 1))
                 # One stop, then plant at EVERY selected arm position: [0, 90] gives
                 # a 4-seed cross (0/180 then 90/270).
                 for a in _drip["angles"]:
@@ -560,37 +868,55 @@ def _cam_loop(url):
                         time.sleep(_ARM_DWELL_S)      # servo must arrive before the drop
                     if not _run["dry"]:
                         Bridge.call("plantSeed")      # both outlets: 2 seeds, 180 apart
+                    else:
+                        # Hold for as long as the real thing takes. With a single arm
+                        # position at 0 there is no spool dwell either, so the stop was
+                        # microseconds long and invisible — the operator saw the robot
+                        # drive straight past 11 emitters it had correctly detected.
+                        time.sleep(_PLANT_SIM_S)
                 if _drip_rotates():
                     Bridge.call("indexSpool", 0)      # leave the arm flat for driving
+                ey = (emit.get("position") or (0, 0))[1]
+                log("  emitter %d — STOPPED at %.2fm (conf %.2f, y=%d/%d) [frame %s]%s"
+                    % (_run["planted"] + 1, travelled, emit["confidence"], ey, h, shot,
+                       " (dry: holding %.1fs, seeder idle)" % _PLANT_SIM_S
+                       if _run["dry"] else ""))
                 _run["planted"] += 1
                 _run["positions"].append((0.0, round(travelled, 3)))
                 armed = False
                 last_plant_at = travelled
                 _emit_run()
-            elif not detected:
-                armed = True                          # emitter left view — ready for the next
-
             # End of lateral is the MARKED plot length, so a long real lateral can be
             # demoed over a deliberately shorter marked plot.
-            if travelled >= _plot["l"]:
+            elif travelled >= _plot["l"]:
                 _drive_stop("drip")
-                _run["state"] = "done"
-                _run["msg"] = ("reached the marked plot length (%.1f m) — %d emitters"
-                               % (_plot["l"], _run["planted"]))
-                _emit_report(_drip_runlog())
-                _emit_run()
-            elif not detected or not armed:
-                if tube["found"]:
-                    c = tube["correction"]
-                    l, r = trimmed(int(_BASE_PWM + _STEER_GAIN * c),
-                                   int(_BASE_PWM - _STEER_GAIN * c))
-                    _drive(max(0, min(255, l)), max(0, min(255, r)), "drip", "forward")
-                    if driving_since:                 # integrate travel while moving
-                        travelled += (now - driving_since) * _DRIP_SPEED_MPS
-                    driving_since = now
+                if lateral + 1 >= max(1, int(_drip.get("laterals", 1))):
+                    _run["state"] = "done"
+                    _run["msg"] = ("done — %d lateral(s), %d emitters"
+                                   % (lateral + 1, _run["planted"]))
+                    _emit_report(_drip_runlog())
+                    _emit_run()
                 else:
-                    _drive_stop("drip")               # lost the tube — don't drive blind
+                    # ROW CHANGE BY SEARCH, not by dead reckoning. Turn off the row,
+                    # then drive across looking for the next tube. Direction alternates
+                    # so the path serpentines; both turns of a pair go the same way.
+                    turn_right = (lateral % 2 == 0)
+                    log("lateral %d done (%d emitters) — turning %s to find the next"
+                        % (lateral + 1, _run["planted"], "right" if turn_right else "left"))
+                    _pivot(90, turn_right)
+                    phase = "traverse"
+                    traversed = 0.0
+                    cross_hist = []
                     driving_since = None
+                    _emit_run()
+            else:
+                # Tube in view, nothing to plant, row not finished: follow it.
+                d = _steer(tube)
+                l, r = trimmed(_BASE_PWM + d, _BASE_PWM - d)
+                _drive(max(0, min(255, l)), max(0, min(255, r)), "drip", "forward")
+                if driving_since:                     # integrate travel while moving
+                    travelled += (now - driving_since) * _DRIP_SPEED_MPS
+                driving_since = now
         else:
             driving_since = None
 
@@ -652,6 +978,87 @@ def _drip_seeds_per_emitter():
     return 2 * max(1, len(_drip["angles"]))       # 2 outlets per arm position
 
 
+_gyro = {"ok": None}          # None = not probed yet
+
+
+def _gyro_ready():
+    """Is the MCU's gyro answering? Probed once, then cached."""
+    if _gyro["ok"] is None:
+        try:
+            r = json.loads(_decode(Bridge.call("getGyro")))
+            _gyro["ok"] = bool(r.get("ok"))
+            if _gyro["ok"]:
+                log("gyro ready on %s (%s), residual %.3f dps — turns are CLOSED-LOOP"
+                    % (r.get("bus"), r.get("addr"), r.get("mean_dps", 0.0)))
+            else:
+                log("no gyro (%s) — turns fall back to the TIMED pivot"
+                    % r.get("err", "?"))
+        except Exception as e:                             # noqa: BLE001
+            _gyro["ok"] = False
+            log("gyro probe failed (%s) — turns fall back to the TIMED pivot" % e)
+    return _gyro["ok"]
+
+
+def _pivot_timed(deg, turn_right):
+    """The original OPEN-LOOP pivot: run the motors for a calibrated time.
+
+    Kept only as the fallback for a missing gyro, and it is the weakest step in the row
+    change. Its premise is a fixed deg/s, and that premise is false: CAL["tdps"] = 45.2
+    was measured on soil, while the gyro measured 68-70 deg/s for the same command on a
+    hard floor. There is no single correct value, which is the whole argument for closing
+    the loop — a 90 deg command here can be out by tens of degrees on the wrong surface.
+    """
+    p = CAL["turn_pwm"]
+    left, right = (p, -p) if turn_right else (-p, p)      # right = CW
+    secs = max(0.0, CAL["tstartup"] + abs(deg) / CAL["tdps"])
+    _drive(*trimmed(left, right), "drip", "right" if turn_right else "left")
+    time.sleep(secs)
+    _drive_stop("drip")
+    time.sleep(0.3)                                        # settle before believing frames
+
+
+def _pivot(deg, turn_right):
+    """Pivot by `deg`, closed on the GYRO when one is fitted.
+
+    Blocking is deliberate: this runs inside the camera loop, and a ~1.5s stall between
+    laterals is harmless — there is nothing to see while the robot spins.
+
+    The MCU drives until the measured chassis rotation reaches the target (less the coast
+    it has learned), so SKID NO LONGER COSTS ANGLE — it only makes the turn take longer,
+    because the gyro watches the body rather than the wheels. Measured 2026-08-17 over
+    four consecutive 90 deg turns: worst error 0.3 deg, and 355 deg of real rotation for
+    360 deg commanded, i.e. no accumulation.
+
+    The one failure it cannot fix is being physically STUCK — a wheel dug into soft soil
+    that cannot rotate. Then the MCU times out and says so, which is the point: the timed
+    pivot reported success and drove off at the wrong heading.
+    """
+    if not _gyro_ready():
+        _pivot_timed(deg, turn_right)
+        return
+    try:
+        r = json.loads(_decode(Bridge.call(
+            "pivotDeg", int(abs(deg)), int(CAL["turn_pwm"]), 1 if turn_right else 0)))
+    except Exception as e:                                 # noqa: BLE001
+        log("  pivot: gyro RPC failed (%s) — falling back to the timed pivot" % e)
+        _pivot_timed(deg, turn_right)
+        return
+    if not r.get("ok"):
+        log("  pivot: %s — falling back to the timed pivot" % r.get("err", "?"))
+        _pivot_timed(deg, turn_right)
+        return
+
+    timed_out = r.get("timeout") in (True, "true")
+    log("  pivot %s %d deg -> achieved %.1f (err %+.1f, %d ms, avg %.1f dps, "
+        "coast %.1f, judder %.1f)%s"
+        % ("right" if turn_right else "left", abs(deg), r["achieved"], r["err_deg"],
+           r["ms"], r.get("avg_dps", 0.0), r.get("coast_seen", 0.0),
+           r.get("judder_deg", 0.0),
+           "  ** TIMED OUT — robot could not rotate (wheel dug in?) **" if timed_out
+           else ""))
+    time.sleep(0.3)                                        # settle before believing frames
+
+
 def _drip_ui_state():
     """"following"/"idle" for the camera overlay. Covers BOTH tube-following runs —
     `scan` (camera tab, collect frames) and `drip` (seed tab, plant at emitters)."""
@@ -667,6 +1074,7 @@ def _drip_readiness():
     return {
         "emitter_gap": _drip["emitter_gap"],
         "angles": list(_drip["angles"]),
+        "laterals": _drip.get("laterals", 1),
         "rotates": _drip_rotates(),
         "seeds_per_emitter": _drip_seeds_per_emitter(),
         "cam_connected": bool(_cam["url"]),
@@ -680,6 +1088,8 @@ def _drip_readiness():
 
 
 def on_drip_config(client, data):
+    if "laterals" in data:
+        _drip["laterals"] = max(1, min(20, int(data["laterals"])))
     if "emitter_gap" in data:
         _drip["emitter_gap"] = max(0.05, float(data["emitter_gap"]))
     if "angles" in data:
@@ -705,6 +1115,201 @@ def _save_capture(frame):
         })
     except Exception as e:                                    # noqa: BLE001
         print("capture save failed: %s" % e, flush=True)
+
+def _save_named(frame, tag):
+    """Save one frame under a decision tag; return the filename (or "")."""
+    try:
+        os.makedirs(_CAP_DIR, exist_ok=True)
+        name = "%s_%s.jpg" % (tag, datetime.now().strftime("%H%M%S"))
+        cv2.imwrite(os.path.join(_CAP_DIR, name), frame)
+        return name
+    except Exception as e:                                    # noqa: BLE001
+        print("named save failed: %s" % e, flush=True)
+        return ""
+
+
+def _fresh_frame(src, budget_s=1.2):
+    """Read past buffered frames and return the LIVE one.
+
+    A pivot blocks for a second or more while the MJPEG decoder keeps buffering, so
+    src.read() straight afterwards hands back the view from mid-spin — and an alignment
+    check on that frame is worse than no check at all. Buffered reads return instantly;
+    a read at the live edge has to wait for the camera. So: read until one waits.
+    (CAP_PROP_BUFFERSIZE would be the tidy fix. It kills this stream — see camera.py.)
+    """
+    ok, frame = src.read()
+    deadline = time.time() + budget_s
+    while ok and time.time() < deadline:
+        t0 = time.time()
+        ok2, f2 = src.read()
+        if not ok2:
+            break
+        frame = f2
+        if time.time() - t0 > 0.04:        # this read waited on the network -> live
+            break
+    return ok, frame
+
+
+def _tilt_str(t):
+    a = t.get("angle_deg")
+    return "tilt n/a" if a is None else "%+.0f deg off vertical" % a
+
+
+# Turning ONTO a found lateral, closed-loop. The coarse pivot deliberately UNDERSHOOTS
+# 90 so the tube is approached from one side only — detect_tube accepts up to 30 deg off
+# vertical, so it is already visible at 72 — and the remainder is closed on what the
+# camera sees rather than on the pivot calibration, which is the least trustworthy number
+# in the row change (open-loop, surface-dependent).
+#
+# The nudge is a fixed short PULSE, not _pivot(small_deg): with tstartup = -0.80 the
+# pivot model clamps anything under ~36 deg to zero command time, so small pivots simply
+# do not happen. A closed loop does not need the step size calibrated — only that it is
+# small, repeatable and in the right direction. Each nudge logs the correction before and
+# after, so the field log measures the real per-nudge effect for us.
+# The coarse pivot is now the FULL 90. It was 72 — a deliberate undershoot, so the tube
+# would always be approached from one side and every nudge could go the same way. That
+# reasoning was entirely about the open-loop pivot being unreliable; with the gyro closing
+# the turn to +/-0.3 deg it is not just unnecessary but harmful, since an 18 deg
+# undershoot would CREATE the misalignment the nudges then have to remove. Vision now
+# confirms and trims rather than doing the bulk of the work.
+_TURN_ON_COARSE = 90
+# These stay PULSE-based rather than calling pivotDeg with a small angle, for a concrete
+# reason: the learned coast at turn_pwm is ~8 deg, so pivotDeg cannot deliver a 5 deg nudge
+# at that duty — it would release almost immediately and coast straight past. A lower PWM
+# would coast less, but s_coast_deg is a single global on the MCU, so mixing duties would
+# poison the estimate the 90 deg turns depend on. A vision-closed pulse needs no
+# calibration at all, which is exactly why it is the right tool here.
+# The pulse GROWS until the robot actually moves. 0.15s produced literally nothing on
+# 2026-08-17: two consecutive alignment frames came back x=195.0, tilt=+9.8, strength
+# 3.1 — different JPEGs (sensor noise), identical scene. From a standstill a short pulse
+# is spent on stiction and the wheels never break away. Rather than guess a number that
+# works on one surface, start small and lengthen whenever the view does not change; the
+# camera says whether the last pulse did anything.
+_NUDGE_PULSE_S   = 0.30
+_NUDGE_PULSE_MAX = 0.75
+_NUDGE_GROWTH    = 1.6
+_NUDGE_TOL       = 0.80   # |correction| (+/-5 full scale) close enough to hand over
+_NUDGE_MAX       = 6
+
+
+def _nudge(turn_right, pulse):
+    p = CAL["turn_pwm"]
+    left, right = (p, -p) if turn_right else (-p, p)
+    _drive(*trimmed(left, right), "drip", "right" if turn_right else "left")
+    time.sleep(pulse)
+    _drive_stop("drip")
+    time.sleep(0.35)                       # settle before believing the next frame
+
+
+# Closing the last stretch before the pivot. The camera looks AHEAD, so a crossing at
+# nearness 0.6 is still well in front of the wheels — pivoting there leaves the lateral
+# beside the robot rather than under it. That is what happened on 2026-08-17: the turn
+# fired at nearness 0.61 and the very next frame showed no vertical tube at all, with the
+# lateral still crossing at y=221. So drive the band down to the bottom of the frame
+# first, then blind-creep the camera's own lookahead.
+_ARRIVE_NEAR    = 0.88
+_ARRIVE_EXTRA_M = 0.20   # camera bottom-edge -> pivot axis. ESTIMATE. To measure: park
+                         # so a tube sits on the bottom edge of the live view, then
+                         # measure tube to wheel axis on the ground.
+_ARRIVE_MAX_S   = 6.0
+
+
+def _creep(metres):
+    """Blind forward creep of roughly this distance (open-loop, like _pivot)."""
+    _drive(*trimmed(_BASE_PWM, _BASE_PWM), "drip", "forward")
+    time.sleep(max(0.0, metres / max(0.01, _DRIP_SPEED_MPS)))
+    _drive_stop("drip")
+    time.sleep(0.3)
+
+
+def _arrive_over_lateral(src):
+    """Creep until the lateral is at the wheels. Returns the best nearness reached."""
+    deadline = time.time() + _ARRIVE_MAX_S
+    best = 0.0
+    while time.time() < deadline:
+        _drive(*trimmed(_BASE_PWM, _BASE_PWM), "drip", "forward")
+        ok, frame = src.read()
+        if not ok:
+            continue
+        c = detect_crossing(frame)
+        if c["found"]:
+            best = max(best, c["nearness"])
+            if c["nearness"] >= _ARRIVE_NEAR:
+                break
+        elif best >= 0.75:
+            break                      # swept out of the bottom of the frame: we are on it
+        time.sleep(0.05)
+    _drive_stop("drip")
+    time.sleep(0.2)
+    _creep(_ARRIVE_EXTRA_M)
+    return best
+
+
+def _turn_onto_tube(src, turn_right, tag):
+    """Pivot onto the lateral, then centre the tube in frame before driving off.
+
+    Still needed after the gyro: a geometrically perfect 90 deg turn does not put the robot
+    ON the tube, because the lateral need not be square to the path we crossed on. The
+    gyro fixes the HEADING CHANGE; only the camera can say where the tube actually is. What
+    changed is the division of labour — vision now trims a good turn instead of rescuing a
+    bad one.
+
+    Every frame the decision is taken on is saved as <tag>_alignN.jpg, and the numbers
+    are logged beside the filename, so a bad landing can be checked against the picture
+    that caused it instead of inferred from the steering flailing seconds later.
+    """
+    _pivot(_TURN_ON_COARSE, turn_right)
+    last = None                            # last accepted correction
+    last_x = None                          # last tube_x seen, to detect "nothing moved"
+    pulse = _NUDGE_PULSE_S
+    for i in range(_NUDGE_MAX + 1):
+        ok, frame = _fresh_frame(src)
+        if not ok:
+            log("  align: no frame after the turn — leaving it open-loop")
+            return
+        t = detect_tube(frame)
+        plausible = _tube_plausible(t)
+        name = _save_named(frame, "%s_align%d" % (tag, i))
+
+        if not plausible:
+            if i >= _NUDGE_MAX:
+                break
+            log("  align %d: no tube-shaped vertical yet (found=%s w=%s s=%.1f) — "
+                "nudging %s %.2fs [%s]"
+                % (i, t["found"], t["width"], t["strength"],
+                   "right" if turn_right else "left", pulse, name))
+            _nudge(turn_right, pulse)      # under-turned: keep coming round
+            pulse = min(_NUDGE_PULSE_MAX, pulse * _NUDGE_GROWTH)
+            last, last_x = None, None
+            continue
+
+        c = t["correction"]
+        log("  align %d: tube x=%.0f, off %+.0f px, correction %+.2f, w=%s s=%.1f, %s [%s]"
+            % (i, t["tube_x"], t["offset_px"], c, t["width"], t["strength"],
+               _tilt_str(t), name))
+        if abs(c) <= _NUDGE_TOL:
+            log("  align: centred after %d nudge(s) — following" % i)
+            return
+        if last_x is not None and abs(t["tube_x"] - last_x) < 3.0:
+            # The view did not change: that pulse moved nothing. Lengthen it and retry
+            # rather than concluding there is no gain to be had — the old code read this
+            # as "no further gain" and handed over a robot that had not turned at all.
+            pulse = min(_NUDGE_PULSE_MAX, pulse * _NUDGE_GROWTH)
+            log("  align: nothing moved — lengthening the nudge to %.2fs" % pulse)
+        elif last is not None and (c * last < 0 or abs(c) >= abs(last) - 0.05):
+            # It DID move, and moved past centre or not usefully. Stop: the follow loop
+            # steers continuously while driving and does this better than pivoting in
+            # place can. Hunting here would just burn the tube out of view.
+            log("  align: no further gain (was %+.2f, now %+.2f) — handing to the "
+                "follow loop" % (last, c))
+            return
+        if i >= _NUDGE_MAX:
+            break
+        _nudge(c > 0, pulse)               # + correction = tube is RIGHT -> turn right
+        last, last_x = c, t["tube_x"]
+    log("  align: not centred after %d nudges — the follow loop takes it from here"
+        % _NUDGE_MAX)
+
 
 def _emit_capture_status():
     ui.send_message("capture_status", {
@@ -827,7 +1432,7 @@ def _battery():
 _plot = {
     "land": "plain",
     "corners": [], "w": 5.0, "l": 5.0,
-    "row_gap": 0.40, "seed_gap": 0.40, "seeds_per_spot": 1,
+    "row_gap": 0.70, "seed_gap": 0.40, "seeds_per_spot": 1,   # laterals measured 2026-08-17
 }
 
 # ONE run for both land types. The robot does the same job either way — drive,

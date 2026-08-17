@@ -368,9 +368,12 @@ setInterval(() => { if (socket.connected) socket.emit('get_stats', {}); }, 2000)
   const hint  = document.getElementById('dr-hint');
   let angles = [0, 90];          // arm positions to plant at; each drops 2 seeds
 
+  const latEl = document.getElementById('dr-laterals');
   const sendCfg = () => socket.emit('drip_config', {
     emitter_gap: +gapEl.value / 100, angles,
+    laterals: latEl ? +latEl.value : 1,
   });
+  if (latEl) latEl.addEventListener('change', sendCfg);
 
   // Land selector shows one flow or the other — they take different inputs.
   document.querySelectorAll('#seg-land .seg-btn').forEach(b =>

@@ -95,7 +95,7 @@
           <div class="row">
             <div class="field pt-dim">
               <label>Row spacing (cm)</label>
-              <input type="number" id="pt-rowgap" min="10" max="200" step="5" value="40">
+              <input type="number" id="pt-rowgap" min="10" max="200" step="5" value="70">
             </div>
             <div class="field pt-dim">
               <label>Seed spacing (cm)</label>
@@ -117,6 +117,14 @@
             <p class="hint">Seeds are placed where the camera <b>sees</b> an emitter.
               This figure only estimates the count and stops one emitter being
               planted twice — it doesn't need to be exact.</p>
+          </div>
+          <div class="field pt-dim">
+            <label>Laterals to seed</label>
+            <input type="number" id="dr-laterals" min="1" max="20" step="1" value="1">
+            <p class="hint">With more than one, the robot <b>searches</b> for the next
+              lateral at the end of a row: turn, drive across until the camera sees a
+              crossing tube, turn onto it. It needs no row spacing and the laterals
+              need not be parallel. It gives up after about three row-gaps of searching.</p>
           </div>
         </div>
 
