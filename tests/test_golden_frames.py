@@ -28,8 +28,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import vision.vision as V                                    # noqa: E402
 
-FRAMES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                      "..", "ai-labs", "apps", "farm-robot", "captures", "golden")
+# THE FRAMES LIVE IN THIS REPO, deliberately. They were first read from the ai-labs captures
+# directory next door, which is gitignored as bulk capture data — so on any machine but the one
+# that shot them these tests called pytest.skip and reported GREEN while testing nothing. A test
+# whose fixtures are not in the repo is not a regression test; it is a note.
+#
+# Seven hand-labelled frames are 400KB, which is a fixture, not a dataset. The thousands of raw
+# captures stay next door where they belong.
+FRAMES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frames", "golden")
 
 # filename -> tube centre column at the bottom of frame, and a note on why it is here
 GOLDEN = {
@@ -49,12 +55,13 @@ TOL_PX = 50
 
 
 def _load(name):
+    # FAIL, do not skip. These frames are committed alongside this file, so a missing or
+    # undecodable one means the fixtures were damaged — and skipping would hide that behind a
+    # green run, which is the exact failure mode that made this suite worthless before.
     p = os.path.join(FRAMES, name)
-    if not os.path.exists(p):
-        pytest.skip("golden frame missing: %s" % name)
+    assert os.path.exists(p), "golden frame missing from the repo: %s" % p
     im = cv2.imread(p)
-    if im is None:
-        pytest.skip("could not decode %s" % name)
+    assert im is not None, "could not decode golden frame %s" % p
     return im if im.ndim == 3 else cv2.cvtColor(im, cv2.COLOR_GRAY2BGR)
 
 
