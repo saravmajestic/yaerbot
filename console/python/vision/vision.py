@@ -184,7 +184,76 @@ def _profile_line(gray, axis, bg_win=81, min_sigma=2.0, min_w=10, max_w=95,
 # does NOT use _MIN_BANDS at all, so the traverse latch that decides a row change is unaffected;
 # and the remaining consumer is _turn_onto_tube's alignment loop, which is capped at 6 nudges
 # and hands over to the follow loop regardless.
+#
+# REVERTED TO 4 on 2026-08-18, after the first field run with 3 drove the robot off the row.
+#
+# THE FRAME THAT SETTLED IT — cap_20260818_104428_437.jpg, the FIRST frame of the run:
+#     bands_raw = [135.5, 268.0, 278.5, 293.5]
+#     _MIN_BANDS=4 -> found=False, reject=line-fit-3-of-4   (correctly refuses)
+#     _MIN_BANDS=3 -> found=True,  x_near=293.5, corr=+4.17 (confidently wrong)
+# The tube is plainly in frame, running top-centre to bottom-left, and the band at 135.5 is
+# ON it. The other three sit on the edge of an OVEREXPOSED white patch on the right. The
+# 3-of-4 fit picked the wrong three, the robot steered hard right, and every correction for
+# the rest of the run stayed positive because it was then following the overexposure boundary.
+#
+# WHY THE 2086-FRAME MEASUREMENT DID NOT CATCH THIS. It is a real measurement and its numbers
+# stand — 33% -> 84% recall on that pass, with the tube position bit-identical where both
+# settings fired. But that pass contained NO COMPETING near-vertical feature: no blown
+# highlights, tube large and central throughout. The caveat was written down at the time and
+# then under-weighted. A 3-of-4 fit is a weak geometric constraint, and the angle gate does not
+# save it when the competitor is ALSO near-vertical.
+#
+# WHAT WOULD EARN 3 BACK, in order:
+#   1. FIX THE EXPOSURE FIRST. The competing feature is a blown highlight — measured
+#      saturation 16 and value 180 in that column, against 38/122 for real tube. It exists
+#      because auto-exposure is running with gain up at 131. scripts/fix_camera.sh --pin
+#      removes it at source, which is better than teaching the detector to ignore it.
+#   2. Then re-measure on a pass that CONTAINS competing features, not one that lacks them.
+#   3. If 3 is still wanted, it needs a tie-break the current fit does not have: prefer the
+#      hypothesis nearest the last ACCEPTED tube column. _track keeps that value, but it lives
+#      in main.py and the detector never sees it. That is a real change, not a constant.
+#
+# Cost of being at 4, honestly: far more `line-fit-3-of-4` rejections and more halts. A halt is
+# recoverable — the run stays active and resumes when the tube is seen. Steering off the row is
+# not.
 _MIN_BANDS = 3
+#
+# FINAL VALUE FOR TODAY: 3. Set to 3 on an offline measurement, reverted to 4 after one field
+# failure, and back to 3 after the field showed 4 CANNOT FOLLOW THE TUBE AT ALL.
+#
+# The deciding run, 12:15-12:16, 36 seconds at _MIN_BANDS=4:
+#     travelled 0.23m  -> FROZEN across all 8 log windows
+#     rejects: 97 per 5s, line-fit-3-of-4 = 100%
+#     tube held 0% of frames
+# The robot drove 23cm on its last good reading and then stopped for good. And the frames it was
+# rejecting are not marginal — lost_121524.jpg has the tube dead centre, obvious, with ALL FOUR
+# bands on it at [178.0, 173.5, 197.0, 159.0].
+#
+# WHY 4 FAILS: those four numbers span 38px across a tube only ~35px wide. The bands land at
+# different points across the tube's OWN width — some on an edge, some on the centre — and no
+# line fits all four within max_line_dev_px. It is not a detection failure; it is per-band
+# position noise being asked to lie on a line more precisely than it can.
+#
+# THINGS THAT DID NOT FIX IT, all measured rather than assumed:
+#   * max_line_dev_px 22 -> 40: recovers 1 extra frame of 4, dense recall 55% -> 60%. Not enough.
+#   * adding RANSAC's missing refit step (least squares on the best hypothesis' inliers, then
+#     re-count): 0 of 3 recovered. The refit pulls toward the 3 inliers it started from, so it
+#     never reaches the line that fits all four.
+#
+# THE COST OF 3, honestly: on 2026-08-18 at 10:44 it took the wrong three of four bands —
+# [135.5, 268.0, 278.5, 293.5], one on the tube and three on an overexposed edge — and steered
+# off the row. Note what that frame was: THE FIRST FRAME OF A RUN, with the tube already at the
+# frame edge and no previous position to sanity-check against. In steady following _track_tube's
+# jump gate (~30px) rejects a 158px leap like that outright; it could only happen with no anchor.
+#
+# SO THE OPERATIONAL RULE IS: START THE RUN WITH THE TUBE NEAR FRAME CENTRE. That removes the
+# only observed failure of 3, and it is what an operator would do anyway.
+#
+# THE REAL FIX, still not built: pass the last accepted tube column into detect_tube and score
+# candidate fits by (inliers, -distance from it) instead of inliers alone. _track["x"] holds it;
+# the detector never sees it. That accepts today's 12:16 frames AND rejects the 10:44 one, with
+# one setting and no operational rule. ~20 lines, and it is the thing to do before trusting this
+# for a demo run.
 
 # AXIS-DOMINANCE TEST: REMOVED 2026-08-18. It compared the strength of the whole-frame
 # vertical profile against the horizontal one, to avoid claiming a crossing tube as the row
@@ -209,7 +278,8 @@ _MIN_BANDS = 3
 
 
 def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
-                max_line_dev_px=22, max_angle_deg=35.0, **kw):
+                max_line_dev_px=22, max_angle_deg=35.0,
+                hint_x=None, hint_win=45, **kw):
     """Find the drip line being followed (near-vertical) and return a steering correction.
 
     Returns dict:
@@ -262,10 +332,69 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
     step = h // bands
     ys_all = [(i + 0.5) * step for i in range(bands)]
 
-    indep = []
-    for i in range(bands):
-        r = _profile_line(gray[i * step:(i + 1) * step, :], 0, **kw)
-        indep.append(None if r is None else r["pos"])
+    # SEARCH NEAR WHERE THE TUBE WAS, THEN ANYWHERE.
+    #
+    # This is the fix for the failure that no value of _MIN_BANDS could avoid. Each band
+    # independently takes the strongest profile peak across the WHOLE frame width, so a band
+    # will happily land on a shadow edge, a straw patch or a sunlit boundary instead of the
+    # tube — and then the line fit either rejects the frame (4-of-4) or draws a line through
+    # the wrong points (3-of-4). Both were observed in the field on 2026-08-18:
+    #
+    #   10:44  bands [135.5, 268.0, 278.5, 293.5]  one on the tube, three on an overexposed
+    #                                              edge -> reported x=293, steered off the row
+    #   12:16  bands [178.0, 173.5, 197.0, 159.0]  ALL on the tube, 38px scatter across a 35px
+    #                                              tube -> no line fits 4, robot froze for 36s
+    #   12:4x  bands [185.5, 156.5, 171.0,  70.5]  bottom band 70px off the tube -> steep wrong
+    #                                              line, x=70 where the truth was ~140
+    #
+    # `hint_x` is the last ACCEPTED tube column from the caller's tracker. Seeded, each band
+    # searches only within hint_win of it, so a band cannot run off to an unrelated feature and
+    # the scatter that broke the fit collapses. If the seeded attempt does not produce a usable
+    # fit — the tube genuinely moved, or we never had it — it falls back to the unseeded search
+    # and re-acquires from scratch. Tracking when it can, re-acquiring when it must.
+    #
+    # NOTE the existing warning in the two-pass comment above still stands and is why this is
+    # NOT seeded band-to-band within a frame: forcing continuity onto noise manufactures the
+    # continuity the test looks for. Seeding from the PREVIOUS FRAME is different — it is an
+    # independent measurement of where the tube was, not a self-referential one.
+    def _scan(seed):
+        out = []
+        for i in range(bands):
+            r = _profile_line(gray[i * step:(i + 1) * step, :], 0,
+                              seed=seed, seed_win=(hint_win if seed is not None else None),
+                              **kw)
+            out.append(None if r is None else r["pos"])
+        return out
+
+    def _n_inliers(cand):
+        pl = [(ys_all[i], cand[i]) for i in range(bands) if cand[i] is not None]
+        if len(pl) < _MIN_BANDS:
+            return 0
+        top = 0
+        for a in range(len(pl)):
+            for b in range(a + 1, len(pl)):
+                (y1, x1), (y2, x2) = pl[a], pl[b]
+                if y2 == y1:
+                    continue
+                m = (x2 - x1) / float(y2 - y1)
+                c = x1 - m * y1
+                top = max(top, sum(1 for y, x in pl
+                                   if abs(x - (m * y + c)) <= max_line_dev_px))
+        return top
+
+    # WHEN HINTED, DO NOT FALL BACK TO A FULL SEARCH. Measured on live_1245.png: with the hint
+    # 30px low the seeded scan fails, and the full-search fallback then returns x=70 — the bad
+    # band, 80px off the tube — where reporting nothing would have been correct. A wrong answer
+    # is worse than no answer here, because the steering acts on it.
+    #
+    # Re-acquisition is not lost: the caller stops hinting once its anchor goes stale (see the
+    # hint expiry in main.py), and then this runs unseeded and re-acquires from scratch.
+    seeded_used = False
+    if hint_x is not None:
+        indep = _scan(float(hint_x))
+        seeded_used = True
+    else:
+        indep = _scan(None)
 
     # ROBUST LINE FIT ACROSS THE BANDS. The tube is straight, so the four band positions
     # should lie on a line; the job is to find that line when some bands are wrong.
@@ -364,7 +493,7 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
             # the line was extrapolated through it — worth logging when steering looks off.
             "bands_x": [round(v, 1) for v in xs], "bands_used": n_inliers,
             "bands_raw": [None if v is None else round(v, 1) for v in indep],
-            "angle_deg": angle, "width": whole["width"],
+            "angle_deg": angle, "width": whole["width"], "seeded": seeded_used,
             # width_fwhm is the PHYSICAL width (see _profile_line) and the one to gate on;
             # `width` is bimodal because it changes meaning with `paired`.
             "width_fwhm": whole["width_fwhm"], "paired": whole["paired"],

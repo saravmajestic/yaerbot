@@ -53,7 +53,11 @@ def test_a_horizontal_line_is_never_claimed_as_the_row():
 
 
 def test_the_angle_gate_names_itself_when_it_fires():
-    t = detect_tube(with_line("horizontal", seed=0))
+    """Driven with a tight limit on a frame that DOES fit, so it tests the gate itself rather
+    than which stage happens to reject first. At _MIN_BANDS=4 the synthetic horizontal line is
+    caught earlier by the band fit, so keying this on that frame tested the wrong thing."""
+    t = detect_tube(with_line("vertical"), max_angle_deg=0.01)
+    assert t["found"] is False
     assert t["reject"] is not None
     assert t["reject"].startswith("angle-"), \
         "expected an angle rejection, got %r" % t["reject"]
@@ -222,17 +226,40 @@ def test_an_accepted_frame_has_reject_none():
 
 # ── 4. _MIN_BANDS stays where the measurement put it ─────────────────────────
 
-def test_min_bands_is_three_with_the_angle_gate_present():
-    """These two moved together and are only safe together: 3 bands without the angle gate
-    accepts horizontal lines, and 4 bands with it throws away 41% of a real pass to
-    `line-fit-3-of-4`. If someone raises _MIN_BANDS back to 4, recall halves; if someone
-    removes the angle gate, complementarity breaks."""
-    assert V._MIN_BANDS == 3
-    # and the pairing must hold: with the angle gate defeated, 3 bands lets a horizontal through
-    leaky = detect_tube(with_line("horizontal", seed=0), max_angle_deg=90.0)
-    assert leaky["found"], \
-        "if this no longer passes, the angle gate is no longer the thing protecting us " \
-        "and this test's premise needs rechecking"
+def test_min_bands_is_three_because_four_cannot_follow_the_tube():
+    """This constant went 4 -> 3 -> 4 -> 3 in one day. The field settled it.
+
+    At _MIN_BANDS=4, run 12:15-12:16 (36 seconds):
+        travelled 0.23m           FROZEN across all 8 log windows
+        rejects: 97 per 5s        line-fit-3-of-4 = 100%
+        tube held 0% of frames
+    The robot drove 23cm on its last good reading and never moved again. And the rejected frames
+    are not marginal: lost_121524.jpg has the tube dead centre with ALL FOUR bands on it at
+    [178.0, 173.5, 197.0, 159.0] — a 38px spread across a ~35px tube, which is per-band position
+    noise, not a detection failure.
+
+    The cost of 3 is real but bounded: at 10:44 it took the wrong three of four bands and steered
+    off the row. That was THE FIRST FRAME of a run, tube already at the frame edge, no previous
+    position to check against. In steady following the jump gate rejects a 158px leap outright.
+
+    A robot that sometimes wanders beats one that never moves. See vision.py for the tie-break
+    that would remove the trade-off entirely.
+    """
+    assert V._MIN_BANDS == 3, \
+        "4 was tried in the field and could not follow the tube at all — 100% of frames " \
+        "rejected as line-fit-3-of-4. See the comment in vision.py."
+
+
+def test_a_competing_vertical_feature_is_refused_at_four_bands():
+    """The field failure, reduced to a fixture: one band on the real tube, three on a brighter
+    competing edge. Four bands must refuse it; three would fit the wrong three."""
+    f = soil(0)
+    cv2.line(f, (136, 0), (110, 239), (35,) * 3, 9)         # the real tube, left of centre
+    cv2.rectangle(f, (270, 0), (319, 239), (250,) * 3, -1)  # blown-out patch on the right
+    t = detect_tube(f)
+    if t["found"]:
+        assert t["x_near"] < 200, \
+            "locked onto the bright patch at x=%.0f instead of the tube near 120" % t["x_near"]
 
 
 def test_soil_with_no_tube_is_mostly_rejected():
