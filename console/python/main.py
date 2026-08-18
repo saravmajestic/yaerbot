@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 import os
 import socket
 import sqlite3
@@ -58,8 +59,34 @@ except Exception as _e:                      # noqa: BLE001
 ui = WebUI()
 
 
+# THE OPERATOR LOG MUST SURVIVE A RESTART. `docker logs` is the only record of what a run did,
+# and it is volatile: on 2026-08-18 an app restart three minutes after a traverse run destroyed
+# the only evidence of why the robot stopped, and the run could not be diagnosed at all. Frames
+# survive because _CAP_DIR is bind-mounted to the host; the log did not.
+#
+# So tee every log line to a file in the app directory, which is the same bind-mounted volume the
+# captures and battery CSV already use. Rotates like the battery CSV — one 4MB file plus one .1
+# backup, which at a few hundred bytes a line is many hours of runs.
+#
+# Deliberately best-effort: a full or read-only disk must never stop the robot logging to stdout,
+# so every failure here is swallowed after one complaint.
+_LOG_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "console.log"))
+_LOG_MAX = 4_000_000
+_log_state = {"warned": False}
+
+
 def log(msg):
-    print("[%s] %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
+    line = "[%s] %s" % (time.strftime("%H:%M:%S"), msg)
+    print(line, flush=True)
+    try:
+        with open(_LOG_FILE, "a") as f:
+            f.write("%s %s\n" % (datetime.now().strftime("%Y-%m-%d"), line))
+        if os.path.getsize(_LOG_FILE) > _LOG_MAX:
+            os.replace(_LOG_FILE, _LOG_FILE + ".1")
+    except Exception as e:                                # noqa: BLE001
+        if not _log_state["warned"]:
+            _log_state["warned"] = True
+            print("persistent log disabled (%s) — stdout only" % e, flush=True)
 
 
 def logged(name, handler):
@@ -126,7 +153,23 @@ def trimmed(left, right):
 # scripts/field_test.py (solve/tsolve). See docs/farm-os/drive-precision.md.
 # batt_comp stays off: the A4 divider still reads low and wanders.
 CAL = {
-    "pwm": 180, "speed": 0.628, "startup": 0.099,
+    # PLOT MODE NOW DRIVES AT CREEP DUTY, matching drip seeding. Changed 2026-08-18 on request:
+    # plain-land and drip runs plant on the same ground with the same seeder, and running them at
+    # different speeds meant two separate calibrations to keep honest — this project has twice
+    # been burnt by a calibration outliving the conditions it was taken under.
+    #
+    # Both pairs are MEASURED with field_test.py, two runs each so startup dead-time is separated
+    # from steady speed rather than smeared into it:
+    #     PWM  55:  fwd 55 30 -> 5.00m,  fwd 55 10 -> 1.70m  => speed 0.165  startup -0.303
+    #     PWM 180:  fwd 180 8 -> 5.00m,  fwd 180 3 -> 1.80m  => speed 0.640  startup +0.187
+    # The old stored pair was 0.628/0.099, i.e. the speed was only 1.9% out — kept above so the
+    # 180 calibration is not lost if plot mode is ever moved back to it.
+    #
+    # THE TRADE: a 40cm hop takes 2.12s instead of 0.81s, so a 5m row is 30s rather than 8s and
+    # the 24-spot plot takes roughly 2 minutes of driving instead of 30 seconds. Slower is also
+    # MORE accurate — less overshoot per stop — but PWM 55 is near the deadband, so watch for
+    # stiction on rough ground. If it stalls or crawls unevenly, that is the reason.
+    "pwm": 55, "speed": 0.165, "startup": -0.303,
     "ltrim": 0.83, "rtrim": 1.00,
     "turn_pwm": 120, "tdps": 45.2, "tstartup": -0.80, "tramp": 0.0,
     # MEASURED 2026-08-18: `fwd 55 10 0.83` covered 1.70m in 10s.
@@ -134,7 +177,15 @@ CAL = {
     # a calibration silently outliving the conditions it was taken under. If _BASE_PWM is
     # changed and this is not re-measured, the mismatch is logged at startup rather than
     # quietly corrupting every distance in the run.
-    "creep": 0.170, "creep_pwm": 55,
+    # MEASURED 2026-08-18 with field_test.py at PWM 55, two runs solved together so the startup
+    # dead-time is separated from the steady speed rather than smeared into it:
+    #     fwd 55 30 0.83 -> 5.00m     fwd 55 10 0.83 -> 1.70m
+    #     => speed = 0.165 m/s, startup = -0.30s
+    # The previous 0.170 was an observation, not a measurement, and was only 3% out — so the
+    # speed constant was NOT the cause of the old "commanded 5m, drove 7m" overrun. That run was
+    # at PWM 77 against a constant of 0.161 while the true speed was ~0.225 (ratio 0.72, which is
+    # exactly the overrun seen), and the PWM change already fixed it.
+    "creep": 0.165, "creep_pwm": 55,
 }
 # Synced 2026-08-16 to the numbers actually validated on soil with field_test.py —
 # this block had drifted and the Seed tab was running stale calibration:
@@ -514,7 +565,18 @@ _FRAME_MAX_AGE_S = 0.25   # unused: superseded by bus.stale_after(), which MEASU
 # result the robot only needs while an emitter is in the reach band. Sizing it: that band is
 # the bottom 45% of the frame, ~108px, which at the measured 1090 px/m is ~10cm of ground and
 # ~0.6s of travel — so 0.15s gives four independent looks inside the window that matters.
-_EMIT_MIN_INTERVAL_S = 0.15
+#
+# 0.15 -> 0.25 after the first field run MEASURED the cost. The log reported inference at
+# 85-96ms (I had estimated 70-90) and the control loop at 18-20 fps against a camera delivering
+# 29.7 — so roughly a third of the frames were going unprocessed. At 0.15s that is ~60% duty on
+# the worker, and although it runs on its own thread it still contends for the GIL and shares the
+# process with the JPEG encode. Threading removed the BLOCKING, not the CPU cost.
+#
+# 0.25s is ~36% duty. It costs emitter looks inside the reach band — ~2.4 per emitter instead of
+# ~4 — which is why _EMIT_CONF was lowered to 0.80 in the same breath, and why the fresh
+# re-confirm at the plant stop exists to recover the precision. Steering needs the frames more:
+# it is the thing that keeps the robot on the row at all.
+_EMIT_MIN_INTERVAL_S = 0.25
 # How far out of date the box may be before the creep distance stops trusting it. The box now
 # carries the CAPTURE TIME of its frame, so this is checked against measured age rather than
 # against when inference happened to start.
@@ -901,16 +963,25 @@ def _tube_grace_reset():
     _tube_hold.update(t=0.0, tube=None, misses=0)
 
 
-def _track_tube(tube, w, now, max_jump_px, anchor_max_s=1.5):
+def _track_tube(tube, w, now, max_jump_px, anchor_max_s=1.5, hinted=False):
     """Accept, reject or re-acquire this frame's tube reading.
 
     `max_jump_px` comes from _gates() rather than a constant, because how far the tube can
     plausibly move depends entirely on how long ago the last reading was taken.
+
+    `hinted` only affects the LOG. A reject means two opposite things: cold, the detector had
+    nothing to go on and losing the tube among stronger features is expected; hinted, it was
+    told within 45px of where the tube actually was and STILL could not find it, which is a real
+    detector failure. Reading them off one undifferentiated histogram, as we did all day, makes
+    a run of expected cold misses look identical to the detector being broken.
     """
     why = _tube_reject(tube)
     if why is not None:
         _track["rejects"] = 0            # nothing to disagree with; do not count it
         _reject_tally[why] = _reject_tally.get(why, 0) + 1
+        if hinted:
+            _reject_tally["(of those, hinted)"] = \
+                _reject_tally.get("(of those, hinted)", 0) + 1
         out = dict(tube)
         out["reject"] = why
         if tube["found"]:                # found, but not tube-shaped: say so
@@ -1262,8 +1333,20 @@ def _cam_loop_run(url, held):
         # plausibility limits instead of silently invalidating them.
         g = _gates(bus.interval())
         odo.update(frame)          # ~1-2ms; measure-only, see the note at the top
-        tube = _track_tube(detect_tube(frame), w, now=now, max_jump_px=g["jump_px"],
-                           anchor_max_s=g["anchor_max_s"])
+        # PASS THE LAST ACCEPTED COLUMN IN. Without this each band takes the strongest peak
+        # anywhere in the frame and lands on shadow edges, straw or sunlit boundaries — which
+        # on 2026-08-18 froze the robot for 36s at _MIN_BANDS=4 and steered it off the row at 3.
+        # _track["x"] is None until the first accepted reading, which is exactly the cold-start
+        # case where there is nothing to hint with.
+        # EXPIRE THE HINT with the anchor. detect_tube does NOT fall back to a full search while
+        # hinted (measured: the fallback returned a band 80px off the tube where reporting nothing
+        # was correct), so a hint that never cleared would block re-acquisition for ever once it
+        # drifted off the tube. This timeout — the same one the jump gate uses — is what makes a
+        # genuine loss recoverable.
+        _hint = _track["x"] if (now - _track["last_ok"]) <= g["anchor_max_s"] else None
+        tube = _track_tube(detect_tube(frame, hint_x=_hint), w, now=now,
+                           max_jump_px=g["jump_px"], anchor_max_s=g["anchor_max_s"],
+                           hinted=_hint is not None)
         tube, holding = _tube_with_grace(tube, now, g)
         # Loop rate, logged while a run is active. The whole point of decoupling the
         # emitter model was to raise this, so it should be visible rather than assumed.
@@ -1300,11 +1383,17 @@ def _cam_loop_run(url, held):
                    "%.2fx" % (travelled / od["distance_m"]) if od["distance_m"] > 0.05
                    else "n/a"))
             if _reject_tally:
+                # The hinted count is a SUBSET of the causes above, not a cause itself, so it is
+                # kept out of both the total and the top-4 — otherwise it would double-count and
+                # could crowd out a real cause in the ranking.
+                hinted_n = _reject_tally.pop("(of those, hinted)", 0)
                 tot = sum(_reject_tally.values())
                 top = sorted(_reject_tally.items(), key=lambda kv: -kv[1])[:4]
-                log("  rejects: %d in %.0fs — %s"
+                log("  rejects: %d in %.0fs — %s | %d while HINTED (%d%%)%s"
                     % (tot, now - loop_t0,
-                       ", ".join("%s %d%%" % (k, round(100.0 * v / tot)) for k, v in top)))
+                       ", ".join("%s %d%%" % (k, round(100.0 * v / tot)) for k, v in top),
+                       hinted_n, round(100.0 * hinted_n / tot) if tot else 0,
+                       " <- detector failing with a good hint" if hinted_n > tot * 0.5 else ""))
                 _reject_tally.clear()
             # The worker's own numbers. `latency` is what the control loop USED to pay per
             # expiry and no longer does, so it is worth seeing; `skipped` being large is
@@ -2231,9 +2320,27 @@ class _Abort(Exception):
 
 
 def _plot_cfg():
+    # edge_margin_m=0 SO THE ROBOT'S STARTING POSITION IS THE FIRST SEED.
+    #
+    # SeedPlan defaults the inset to HALF the relevant gap, which centres seeds in their cells and
+    # keeps the outer row off the boundary. Geometrically tidy, but wrong for how this is actually
+    # operated: the operator physically places the robot at corner 1 and expects it to plant where
+    # it stands. With the default the first spot sat 50cm across and 20cm along from corner 1,
+    # which reads as the robot ignoring where you put it.
+    #
+    # THIS ALSO CHANGES THE SPOT COUNTS, because _count() is int((span - 2*inset)/gap) + 1:
+    #     inset=gap/2 : w=2.0 gap=1.0 -> 2 rows at 0.5, 1.5   l=5.0 gap=0.4 -> 12 seeds 0.2..4.6
+    #     inset=0     : w=2.0 gap=1.0 -> 3 rows at 0, 1, 2    l=5.0 gap=0.4 -> 13 seeds 0.0..4.8
+    # So `w` now means the distance between the OUTERMOST rows, not a bounding box with margins:
+    # 2 rows 1m apart is w=1.0, not w=2.0. Worth knowing before entering numbers.
+    #
+    # The trade given up: the outermost row now sits ON the plot boundary, so there is no built-in
+    # headland for the turn. The turn happens at the far end of the row either way, so it needs
+    # clear ground past corner 2 rather than inside the marked plot.
     return SeedPlan(plot_w_m=_plot["w"], plot_l_m=_plot["l"],
                     row_gap_m=_plot["row_gap"], seed_gap_m=_plot["seed_gap"],
                     seeds_per_spot=int(_plot["seeds_per_spot"]),
+                    edge_margin_m=0.0,
                     speed_mps=CAL["speed"], crop="groundnut")
 
 
@@ -2268,7 +2375,54 @@ def _emit_run():
     ui.send_message("run", {**{k: _run[k] for k in
                                ("mode", "state", "planted", "total", "msg", "dry")},
                             **_drip_readiness()})
-    _emit_plot()                                   # keep the plan overlay in step
+    # preview=True IS LOAD-BEARING. Without it this message carries no `planned` key, and the
+    # UI's draw() rebuilds the whole SVG from whatever arrived — so `d.planned || []` renders the
+    # corner markers and nothing else. _emit_run() is called from 20 places (every state change,
+    # every plant, every plot_mark), so the plan appeared on plot_config and was then WIPED by the
+    # next corner mark. That is exactly what it did on 2026-08-18: four green marks, four corner
+    # circles, no dots, and the placeholder text back.
+    #
+    # The comment here used to read "keep the plan overlay in step", which is what it failed to
+    # do. Recomputing the preview is arithmetic over a couple of dozen waypoints, so there is no
+    # reason to send a partial message the client can only read as "no plan".
+    _emit_plot(preview=True)                       # keep the plan overlay in step
+
+
+# ── Heading drift on plain-land hops ─────────────────────────────────────────
+# PLAIN-LAND ONLY. Drip mode follows the tube by sight, which is closed-loop on the real target;
+# holding a heading there would fight the vision steering on a lateral that genuinely curves.
+#
+# A plot row is 13 open-loop hops against one fixed trim. A 2-3 deg veer per hop is 2cm sideways
+# — nothing once, 39 deg of heading error by the end of a row, and nothing measured it.
+#
+# MEASURE-ONLY UNTIL THE SIGN IS CONFIRMED. The correction direction depends on whether a LEFT
+# (counter-clockwise) rotation reads POSITIVE or negative from this gyro, and that cannot be read
+# off the firmware: pivotDeg only ever compares fabsf(signed_a), so it never reveals the
+# convention. Guessing it would DOUBLE the error instead of cancelling it, on a robot that is
+# already hard to keep on a row. So the first runs log the drift and act on nothing.
+#
+# TO CONFIRM IT, with the robot switched on and motors idle:
+#     ssh unoq 'docker exec motor-control-main-1 python3 /app/python/field_test.py gspin 5'
+#   then turn the robot BY HAND anti-clockwise through most of a turn while it counts.
+#   gyroIntegrate reports SIGNED degrees, so the sign it prints IS the convention:
+#     positive -> anti-clockwise (left) is positive  -> set _YAW_LEFT_POSITIVE = True
+#     negative -> anti-clockwise (left) is negative  -> set _YAW_LEFT_POSITIVE = False
+#   Then set _HEADING_CORRECT = True.
+_HEADING_CORRECT = True           # sign confirmed 2026-08-18, see below
+# CONFIRMED 2026-08-18 with the flashed firmware, which is better than the hand-spin because it
+# exercises the real path: yawHop(120, -120, 800) commands (+L,-R) = a RIGHT pivot, and the gyro
+# reported yaw_deg = -60.26. So a right turn reads NEGATIVE and a left turn reads POSITIVE.
+_YAW_LEFT_POSITIVE = True
+# The threshold cannot be small: the learned pivot coast at turn_pwm is ~4-8 deg, so any pivot
+# under about that simply releases and coasts straight past the target. 10 deg is the smallest
+# correction the hardware can actually deliver. At 2-3 deg of veer per hop that is a correction
+# roughly every four hops — visible, but nothing like 13 hops of silent accumulation.
+_HEADING_ERR_LIMIT_DEG = 10.0
+_plot_yaw = {"err": 0.0, "hops": 0, "worst": 0.0, "corrections": 0}
+
+
+def _plot_yaw_reset():
+    _plot_yaw.update(err=0.0, hops=0, worst=0.0, corrections=0)
 
 
 class _ProgressRobot(BridgeRobot):
@@ -2285,12 +2439,109 @@ class _ProgressRobot(BridgeRobot):
             raise _Abort()
 
     def forward(self, distance_m):
+        """Drive one hop and MEASURE the rotation, so veer stops accumulating unseen.
+
+        Falls back to the base timed hop whenever the gyro is missing or yawHop fails, so this is
+        never worse than what it replaces.
+
+        The battery gain that BridgeRobot._apply() would normally apply is skipped: the monitor is
+        disabled (BATT_PRESENT 0, since A4/A5 carry the gyro) so the gain is 1.0 anyway. If the
+        probe is ever refitted this must be restored, or the duty will be wrong under sag.
+        """
         self._gate()
-        super().forward(distance_m)
+        if not _gyro_ready():
+            super().forward(distance_m)
+            return
+        l = int(round(self.pwm * self.left_trim))
+        r = int(round(self.pwm * self.right_trim))
+        ms = int(1000 * max(0.0, self.startup_s + distance_m / self.speed_mps))
+        try:
+            res = json.loads(_decode(Bridge.call("yawHop", l, r, ms)))
+        except Exception as e:                                  # noqa: BLE001
+            log("  yawHop RPC failed (%s) — plain timed hop, no heading measurement" % e)
+            super().forward(distance_m)
+            return
+        if not res.get("ok"):
+            log("  yawHop: %s — plain timed hop" % res.get("err", "?"))
+            super().forward(distance_m)
+            return
+
+        # Dead reckoning on the COMMANDED move, exactly as the base class does. The measured
+        # rotation is deliberately NOT fed back into x/y: it says the heading drifted, not where
+        # the robot ended up, and pretending otherwise would corrupt the position estimate too.
+        rad = math.radians(self.heading)
+        self.x += distance_m * math.cos(rad)
+        self.y += distance_m * math.sin(rad)
+
+        yaw = float(res.get("yaw_deg", 0.0))
+        _plot_yaw["err"] += yaw
+        _plot_yaw["hops"] += 1
+        if abs(yaw) > abs(_plot_yaw["worst"]):
+            _plot_yaw["worst"] = yaw
+        self._snap("fwd %.2fm yaw %+.1f" % (distance_m, yaw))
+
+        # LOG EVERY HOP, not just the ones that trigger a correction. Without this a CLEAN run
+        # produces no heading data at all, so "the correction works" and "the correction never
+        # ran" look identical afterwards — and the clean run is the one that has to prove it.
+        # `rejected` is the MCU's spike filter (spurious ~-186 dps samples seen while stationary);
+        # if it climbs above 1-2 per hop the gyro read path itself needs looking at, and nothing
+        # else in the system would ever tell us. `judder` is a magnitude and must never be < 0.
+        log("  hop %2d: %.2fm  yaw %+5.1f  cum %+6.1f  (peak %+.0f dps, judder %.1f, "
+            "rejected %d, bias %+.3f)"
+            % (_plot_yaw["hops"], distance_m, yaw, _plot_yaw["err"],
+               res.get("peak_dps", 0.0), res.get("judder", 0.0),
+               res.get("rejected", 0), res.get("bias", 0.0)))
+
+        e = _plot_yaw["err"]
+        if abs(e) < _HEADING_ERR_LIMIT_DEG:
+            return
+        if not (_HEADING_CORRECT and _YAW_LEFT_POSITIVE is not None):
+            # Say it loudly and keep driving. This is the number that decides whether the
+            # correction is worth enabling, and what sign it needs.
+            log("  HEADING DRIFT %+.1f deg over %d hops (worst hop %+.1f) — NOT corrected: "
+                "measure-only until the gyro sign is confirmed. See _YAW_LEFT_POSITIVE."
+                % (e, _plot_yaw["hops"], _plot_yaw["worst"]))
+            _plot_yaw["err"] = 0.0          # do not let it grow without bound in the log
+            return
+        # drifted one way -> pivot the other. _pivot takes (magnitude, turn_right).
+        drifted_left = (e > 0) if _YAW_LEFT_POSITIVE else (e < 0)
+        log("  heading drift %+.1f deg over %d hops — correcting %s"
+            % (e, _plot_yaw["hops"], "right" if drifted_left else "left"))
+        _pivot(abs(e), drifted_left)
+        _plot_yaw["err"] = 0.0
+        _plot_yaw["corrections"] += 1
 
     def turn_to(self, heading_deg):
+        """GYRO-CLOSED turn, same as the drip row change. Falls back to the timed pivot.
+
+        Plot mode used BridgeRobot.turn_to, which computes a DURATION from tdps/tstartup and
+        drives blind for that long — so skid becomes heading error and it ACCUMULATES row over
+        row. That is exactly what the gyro was fitted to fix, and until now plain-land runs got
+        none of the benefit: measured over four consecutive 90 deg turns, the gyro pivot's worst
+        error is 0.3 deg with 355 deg of real rotation for 360 commanded, i.e. no accumulation.
+
+        _pivot() falls back to _pivot_timed() by itself on every failure path — no gyro, RPC
+        error, or an MCU that reports not-ok — so this is strictly better than what it replaces
+        rather than a new dependency. Two things it cannot do: turns smaller than the learned
+        coast at turn_pwm (~8 deg), which is why the 0.5 deg deadband below stays; and freeing a
+        physically stuck wheel, where it times out and SAYS so instead of driving off at the
+        wrong heading.
+
+        The heading is set from the COMMANDED angle, not a measured one. The MCU closes the loop
+        internally and does not report the achieved angle back through pivotDeg, so the executor's
+        dead-reckoning model still assumes the turn landed. That is a real limitation, and it is
+        far smaller than the error the timed turn was leaving behind.
+        """
         self._gate()
-        super().turn_to(heading_deg)
+        delta = ((heading_deg - self.heading + 180) % 360) - 180   # shortest signed turn
+        if abs(delta) <= 0.5:
+            self.heading = heading_deg
+            return
+        # setMotors(-pwm, +pwm) swings CCW and INCREASES heading, so a positive delta is a LEFT
+        # turn. Getting this backwards would send every row change the wrong way.
+        _pivot(abs(delta), delta < 0)
+        self.heading = heading_deg
+        self._snap("gyro turn %+.0fdeg" % delta)
 
     def plant(self):
         self._gate()
@@ -2304,6 +2555,9 @@ def _plot_loop():
     path = plan_boustrophedon(cfg)
     _run["total"] = len(path) * int(_plot["seeds_per_spot"])
     _run["planted"] = 0
+    # A second run must not inherit the first run's accumulated drift — the same class of bug
+    # that made a second run resume the previous run's `travelled`.
+    _plot_yaw_reset()
     robot = _ProgressRobot(
         speed_mps=CAL["speed"], startup_s=CAL["startup"], pwm=int(CAL["pwm"]),
         left_trim=CAL["ltrim"], right_trim=CAL["rtrim"],
@@ -2333,6 +2587,17 @@ def _plot_loop():
             _run["msg"] += " · %d diag warning(s)" % len(robot.warnings)
             for w in robot.warnings:
                 log("run diag: %s" % w)
+        # HEADING SCORECARD — one line that says whether the gyro hop measurement earned its
+        # keep. Printed on abort and on failure too (it is in `finally`), because a run that
+        # went wrong is exactly when the drift history matters most.
+        if _plot_yaw["hops"]:
+            log("heading: %d hops measured, residual %+.1f deg, worst single hop %+.1f, "
+                "%d correction(s) applied"
+                % (_plot_yaw["hops"], _plot_yaw["err"], _plot_yaw["worst"],
+                   _plot_yaw["corrections"]))
+        else:
+            log("heading: NO hops measured — yawHop never ran (no gyro, or every call "
+                "fell back to the timed hop). Veer was not being watched this run.")
         _emit_run()
 
 

@@ -71,7 +71,17 @@ def test_console_imports_without_error():
     assert mod.CAL["speed"] > 0
     # the bug this test exists for: derived at module level from CAL
     assert mod._DRIP_SPEED_MPS > 0
-    assert mod._DRIP_SPEED_MPS < mod.CAL["speed"]   # follow duty is below drive duty
+    # PLOT AND DRIP NOW RUN AT THE SAME DUTY (PWM 55, 0.165 m/s), changed 2026-08-18 so the two
+    # modes plant on the same ground at the same speed and there is only ONE calibration to keep
+    # honest. This assertion used to be `_DRIP_SPEED_MPS < CAL["speed"]` — "follow duty is below
+    # drive duty" — and it correctly failed when the invariant was deliberately removed, which is
+    # the test doing its job rather than a stale expectation.
+    assert mod._DRIP_SPEED_MPS <= mod.CAL["speed"], \
+        "the follow duty must never EXCEED the plot drive duty"
+    assert mod.CAL["pwm"] == mod._BASE_PWM, \
+        "plot mode drives at CAL['pwm']=%s while tube-following uses _BASE_PWM=%s — two duties " \
+        "means two calibrations, and one of them will go stale unnoticed" % (
+            mod.CAL["pwm"], mod._BASE_PWM)
 
 
 def test_every_registered_handler_exists_and_is_callable():

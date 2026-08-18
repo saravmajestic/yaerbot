@@ -29,3 +29,8 @@ farmos/planner/data/weather_cache.json
 
 # Runtime logs written by the console on the board
 console/battery.csv
+
+# Persistent operator log written by the console at run time (see log() in main.py).
+# It exists so a run survives an app restart; it is machine output, not source.
+console/console.log
+console/console.log.1

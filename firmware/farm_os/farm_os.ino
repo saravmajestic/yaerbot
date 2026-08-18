@@ -608,6 +608,102 @@ String rpc_getGyro() {
 // far easier to call accurately than 90 — and compare. It isolates sensitivity from
 // everything else that muddies a driven turn: no skid, no coast, no PWM, no early
 // release. reported/actual is the correction, directly.
+// ── yawHop: drive a straight hop and REPORT HOW MUCH THE ROBOT ROTATED ────────
+// PLAIN-LAND SEEDING ONLY. Drip mode follows the tube by sight, which is closed-loop on the
+// real target — holding a heading there would fight the vision steering and pull the robot off
+// a lateral that genuinely curves.
+//
+// WHY THIS EXISTS. A plot run is 13 hops of 40cm per row, each one open-loop against a single
+// fixed left/right trim. A 2-3 deg veer per hop is 2cm sideways — harmless once, and 39 deg of
+// heading error by the end of a row. Nothing measured it, so nothing knew.
+//
+// WHY IT IS ONE RPC AND NOT setMotors + gyroIntegrate + stop. gyroIntegrate spends its first
+// 150ms sampling bias, and if the wheels are already turning that sample absorbs real rotation
+// and then subtracts it from the whole window — the measurement would be corrupted by exactly
+// the thing it is measuring. Ordering matters, so the MCU owns it: stop, settle, sample bias
+// while genuinely still, THEN drive. Same sequence pivotDeg already uses.
+//
+// WHY SHORT WINDOWS. Measured 2026-08-18 on a still robot, the bias estimate is good to about
+// +/-0.14 dps. Over one 2.4s hop that is 0.34 deg of measurement error against a 2-3 deg signal
+// — 7:1, plenty. Over a 90s run it would be 12.6 deg, which is why the caller must NOT ask for
+// one long window and call it absolute heading. Re-sampling per hop makes the errors random-sign,
+// so they accumulate as a random walk (~1.2 deg over a row) instead of a straight line.
+//
+// The settle window after the motors cut is deliberate: the chassis keeps rotating through the
+// stop, and that rotation is part of the hop's real heading change. Ending the integral at
+// rpc_stop() would under-report it every time.
+#define YAWHOP_SETTLE_MS 200
+// SPIKE REJECT, and why it is a rate limit rather than a magnitude clamp.
+// A stationary robot with ZERO pwm reported peak_dps -186.5, and a separate stationary gyro test
+// reported -186.630 — the same wild value twice is a systematic bad I2C read, not noise. One such
+// sample at the 200Hz rate injects about 1 deg of phantom rotation, which against a 10 deg
+// correction threshold is enough to trigger a pivot for drift that never happened.
+//
+// It CANNOT be filtered on magnitude alone: a real pivot at turn_pwm peaks around -219 dps, so
+// -186 sits inside the plausible range. What separates them is context — during a STRAIGHT hop the
+// chassis has no business rotating at even a fraction of that. So the limit applies only here, in
+// the straight-hop path, and pivotDeg's read path is deliberately left alone because it works.
+//
+// 60 dps is ~7x the worst veer worth measuring (a 3 deg drift over a 2.4s hop is 1.25 dps) and well
+// under the spike. A genuine violent swerve — a wheel breaking loose in soft soil — would be
+// under-measured, which is the right way round: it shows up as the robot visibly off-line rather
+// than as a phantom correction.
+#define YAWHOP_MAX_DPS 60.0f
+
+String rpc_yawHop(int l_pwm, int r_pwm, int ms) {
+  if (!s_imu_ok && !imuBegin()) {
+    return "{\"ok\":false,\"err\":\"no gyro — caller must fall back to a plain timed hop\"}";
+  }
+  ms = constrain(ms, 50, 20000);
+  rpc_stop();
+  delay(200);                                     // let the chassis settle before sampling
+  s_imu_bias = imuSampleBias(150);                // standing still, right now
+
+  float signed_a = 0, abs_a = 0, peak = 0;
+  int rejected = 0;
+  uint32_t last = micros();
+  rpc_setMotors(l_pwm, r_pwm);
+  uint32_t t0 = millis();
+  while (millis() - t0 < (uint32_t)ms) {
+    float dps;
+    uint32_t now = micros();
+    float dt = (now - last) / 1000000.0f;
+    last = now;
+    if (mpuGyroZ(dps)) {
+      float r = dps - s_imu_bias;
+      if (fabsf(r) > fabsf(peak)) peak = r;        // report the spike even when we drop it
+      if (fabsf(r) > YAWHOP_MAX_DPS) { rejected++; }
+      else {
+        signed_a += r * dt;                       // SIGNED: the net heading change
+        abs_a    += fabsf(r) * dt;                // judder, for diagnosis only
+      }
+    }
+  }
+  rpc_stop();
+  uint32_t t1 = millis();                         // coast is part of the real rotation
+  while (millis() - t1 < YAWHOP_SETTLE_MS) {
+    float dps;
+    uint32_t now = micros();
+    float dt = (now - last) / 1000000.0f;
+    last = now;
+    if (mpuGyroZ(dps)) {
+      float r = dps - s_imu_bias;
+      if (fabsf(r) > YAWHOP_MAX_DPS) { rejected++; continue; }
+      signed_a += r * dt;
+      // DEFECT FIXED: abs_a was not updated here, so signed_a outgrew it through the settle and
+      // judder came back NEGATIVE (-4.71 on the first real hop), which is impossible by
+      // construction. yaw_deg was always correct; only the diagnostic was wrong.
+      abs_a    += fabsf(r) * dt;
+    }
+  }
+  return String("{\"ok\":true,\"yaw_deg\":") + String(signed_a, 2) +
+         ",\"judder\":" + String(abs_a - fabsf(signed_a), 2) +
+         ",\"peak_dps\":" + String(peak, 1) +
+         ",\"rejected\":" + String(rejected) +
+         ",\"ms\":" + String(ms) +
+         ",\"bias\":" + String(s_imu_bias, 3) + "}";
+}
+
 String rpc_gyroIntegrate(int ms) {
   if (!s_imu_ok && !imuBegin()) return "{\"ok\":false,\"err\":\"no gyro\"}";
   ms = constrain(ms, 500, 30000);
@@ -966,6 +1062,7 @@ void setup() {
   Bridge.provide("i2cLines",       rpc_i2cLines);
   Bridge.provide("pivotDeg",       rpc_pivotDeg);
   Bridge.provide("gyroIntegrate",  rpc_gyroIntegrate);
+  Bridge.provide("yawHop",         rpc_yawHop);
   Bridge.provide("setGyroScale",   rpc_setGyroScale);
 
   if (s_mon_ok) Monitor.println("RPCs registered — ready");
