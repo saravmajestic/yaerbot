@@ -48,15 +48,66 @@ def test_a_known_shift_comes_back_as_the_right_distance():
 
 
 def test_a_stationary_robot_accumulates_almost_nothing():
-    """THE PROPERTY THAT MATTERS MOST for integrating distance: a parked robot must not drift.
-    Measured on real frames, stationary pairs read 0.06px — the dense pass had manual stops for
-    course correction and they show up cleanly as zero flow."""
+    """A parked robot must not drift. NOTE this fixture is a perfect duplicate frame and is NOT
+    sufficient on its own — see the vibration test below, which is the one that has teeth."""
     odo = FlowOdometer()
     base = _texture(1)
     for _ in range(30):
         odo.update(base.copy())
     assert odo.distance_m < 0.01, \
         "a parked robot accumulated %.3fm of phantom travel over 30 frames" % odo.distance_m
+
+
+def test_a_parked_but_VIBRATING_robot_accumulates_almost_nothing():
+    """THE TEST THAT SHOULD HAVE EXISTED FIRST, and the bug it would have caught.
+
+    The original implementation integrated abs(dy). That is a rectified integral: vibration and
+    correlation noise ADD and never subtract, so the total climbs whether or not the robot moves.
+    Measured against a tape it read 0.274 m/s where the truth was 0.165 — 66% high — and it
+    reported a beautifully consistent 0.62 ratio across every log window, which looked like a
+    real measurement and was error accumulation.
+
+    The old stationary test could not see it, because a perfect duplicate frame has no noise to
+    rectify. A robot parked on soil vibrates. This fixture jitters the frame by a fraction of a
+    pixel with no net displacement, which is what that looks like.
+    """
+    rng = np.random.default_rng(7)
+    odo = FlowOdometer()
+    base = _texture(2)
+    odo.update(base)
+    # 200 frames is ~7 seconds at 30fps — a realistic pause, and long enough that a rectified
+    # integral is unmistakable. At 60 frames the old code accumulated only 0.03m and slipped
+    # under the threshold, so the first version of this test had no teeth either.
+    for _ in range(200):
+        # sub-pixel jitter about a fixed point: net displacement zero, per-frame shift nonzero
+        dy = float(rng.normal(0.0, 0.7))
+        dx = float(rng.normal(0.0, 0.7))
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        jittered = cv2.warpAffine(base, M, (base.shape[1], base.shape[0]),
+                                  borderMode=cv2.BORDER_REFLECT)
+        odo.update(jittered)
+    assert odo.distance_m < 0.04, \
+        "vibration alone accumulated %.3fm over 200 frames — the integral is rectified" % (
+            odo.distance_m)
+
+
+def test_noise_smaller_than_real_motion_is_ignored_but_real_motion_is_not():
+    """The floor has to sit BELOW the signal. At 0.165 m/s and a 34ms frame, real travel is
+    0.165*0.034*1090 = 6.1px, so a 1.5px floor keeps the signal and drops the jitter."""
+    from vision.odometry import MIN_SHIFT_PX
+    real_px = 0.165 * 0.034 * 1090
+    assert MIN_SHIFT_PX < real_px / 3, \
+        "floor %.1fpx is too close to the real per-frame shift of %.1fpx" % (
+            MIN_SHIFT_PX, real_px)
+    # and a shift at the real magnitude must still be integrated
+    odo = FlowOdometer()
+    t = _texture(8)
+    odo.update(t)
+    for _ in range(10):
+        t = _shift_down(t, 6)
+        odo.update(t)
+    assert odo.distance_m > 0.04, \
+        "6px/frame is real motion and must accumulate, got %.3fm" % odo.distance_m
 
 
 def test_faster_motion_reads_as_more_distance():

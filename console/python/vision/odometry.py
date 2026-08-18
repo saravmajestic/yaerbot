@@ -41,6 +41,23 @@ MIN_RESPONSE = 0.15
 # correlation that locked onto the wrong feature entirely.
 MAX_SHIFT_PX = 60.0
 
+# NOISE FLOOR, and the reason this class was over-reading by 66%.
+#
+# The first version integrated abs(dy). That is a RECTIFIED integral: vibration, rotation and
+# correlation noise all ADD and never subtract, so on soil the total climbs monotonically whether
+# or not the robot is moving. Measured against a tape on 2026-08-18 it read 0.274 m/s where the
+# truth was 0.165 — 66% high — and it read a consistent 0.62 ratio across every log window, which
+# looked like a real measurement and was error accumulation.
+#
+# Two changes fix it. The travel is now integrated SIGNED, so noise cancels instead of piling up
+# and the distance is the magnitude of the NET displacement. And a shift smaller than this floor
+# contributes nothing at all: real travel at 0.165 m/s over a 34ms frame is
+# 0.165 * 0.034 * 1090 = 6.1px, so 1.5px is comfortably below the signal and above the jitter.
+#
+# The old unit test could not catch this: it fed a perfectly static DUPLICATE frame, which has no
+# noise to rectify. A stationary robot on real soil vibrates, and that is the case that mattered.
+MIN_SHIFT_PX = 1.5
+
 
 class FlowOdometer:
     """Integrate forward travel from consecutive frames.
@@ -58,6 +75,7 @@ class FlowOdometer:
         self._roi = roi
         self._prev = None
         self._win = None
+        self._net_dy = 0.0          # SIGNED accumulator; noise cancels here
         self.distance_m = 0.0
         self.updates = 0
         self.rejected = 0        # pairs whose correlation was not trustworthy
@@ -72,6 +90,7 @@ class FlowOdometer:
 
     def reset(self):
         self.distance_m = 0.0
+        self._net_dy = 0.0
         self._prev = None
         self.updates = 0
         self.rejected = 0
@@ -97,10 +116,16 @@ class FlowOdometer:
         if response < MIN_RESPONSE or abs(dy) > MAX_SHIFT_PX:
             self.rejected += 1
             return 0.0
-        m = abs(dy) / self.px_per_m
-        self.distance_m += m
+        if abs(dy) < MIN_SHIFT_PX:
+            # Below the noise floor: contribute NOTHING rather than a small positive amount.
+            # Summing these is what made a parked robot accumulate phantom travel.
+            self.updates += 1
+            return 0.0
+        before = abs(self._net_dy)
+        self._net_dy += dy                      # signed, so jitter cancels over time
+        self.distance_m = abs(self._net_dy) / self.px_per_m
         self.updates += 1
-        return m
+        return (abs(self._net_dy) - before) / self.px_per_m
 
     def stats(self):
         return {"distance_m": round(self.distance_m, 3), "updates": self.updates,

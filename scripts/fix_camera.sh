@@ -69,6 +69,25 @@ AWB=$(pick_ctrl white_balance_automatic white_balance_temperature_auto) || {
 WBT=$(pick_ctrl white_balance_temperature || true)
 AE=$(pick_ctrl auto_exposure exposure_auto || true)
 ET=$(pick_ctrl exposure_time_absolute exposure_absolute || true)
+# GAIN IS AUTO-CONTROLLED IN APERTURE PRIORITY, AND IT DOES NOT SAY SO.
+#
+# It carries no `inactive` flag, so it looks independently settable, and a write appears to
+# succeed. It does not. Verified on the board:
+#     v4l2-ctl -c gain=64        -> exit 0
+#     v4l2-ctl --get-ctrl gain   -> 64     <- the DRIVER's cached value
+#     v4l2-ctl -C gain           -> 192    <- what the DEVICE actually has
+# The camera's own auto-exposure algorithm drives it straight back. So a high gain reading under
+# auto exposure is the camera responding to the scene, NOT a value left frozen by a previous --pin,
+# and there is nothing here to reset.
+#
+# THE TRAP WORTH REMEMBERING: `--get-ctrl` reports what the driver cached and will happily echo a
+# value the hardware ignored. `-C` (capital) queries the device. Use `-C` to verify anything you
+# set on this camera, or you will confirm your own write and learn nothing.
+#
+# Gain is therefore only worth pinning alongside MANUAL exposure, where the auto algorithm is not
+# fighting you.
+GAIN=$(pick_ctrl gain || true)
+GAIN_DEFAULT=64
 
 show() {
     for c in "$AWB" "$WBT" "$AE" "$ET" gain brightness; do
@@ -92,6 +111,8 @@ case "${1:-}" in
         v4l2-ctl -d "$DEV" -c "$AE"=1 || echo "  (could not set manual exposure)"
         [ -n "$ET" ] && v4l2-ctl -d "$DEV" -c "$ET"=166
     fi
+    # Pin gain too, or the value the auto algorithm had ramped to stays frozen in place.
+    [ -n "$GAIN" ] && v4l2-ctl -d "$DEV" -c "$GAIN"=$GAIN_DEFAULT
     echo "after:"
     show
     exit 0
@@ -108,6 +129,9 @@ sleep 1
 # Also hand exposure back to auto, in case a previous --pin left it manual and that is what
 # is making the picture wrong now.
 [ -n "$AE" ] && v4l2-ctl -d "$DEV" -c "$AE"=3 2>/dev/null || true
+# Gain is deliberately NOT touched here: under Aperture Priority the camera owns it and drives
+# any write straight back (see the note above). Setting it would look like it worked and change
+# nothing.
 echo "after:"
 show
 echo
