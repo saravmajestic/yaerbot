@@ -1239,6 +1239,7 @@ def _cam_loop_run(url, held):
     cross_hist = []             # recent crossing sightings: (time, tube_y)
     loop_t0, loop_n = time.time(), 0     # camera-loop rate, logged during a run
     grace_n = 0                          # frames driven on a HELD reading (shadow gaps)
+    _susp_n = 0                          # accepted frames demanding a near full-scale steer
     bus_frames0 = 0                      # camera frame count at the last rate log
     last_cross_log = 0.0
     prev_run_state = None       # to detect a FRESH run and reset per-run counters
@@ -1382,6 +1383,11 @@ def _cam_loop_run(url, held):
                    od["rejected"],
                    "%.2fx" % (travelled / od["distance_m"]) if od["distance_m"] > 0.05
                    else "n/a"))
+            if _susp_n:
+                # ~9% is NORMAL (measured, see the screen above). Read this as "how many frames
+                # are worth eyeballing", not as a fault count.
+                log("  suspect accepts: %d frame(s) jumped >=60%% of the gate "
+                    "(first 12 saved as suspect-*.jpg; ~9%% is normal)" % _susp_n)
             if _reject_tally:
                 # The hinted count is a SUBSET of the causes above, not a cause itself, so it is
                 # kept out of both the total and the top-4 — otherwise it would double-count and
@@ -1434,6 +1440,7 @@ def _cam_loop_run(url, held):
             phase, lateral, travelled, traversed = "follow", 0, 0.0, 0.0
             odo.reset()
             cross_hist = []
+            _susp_n = 0             # a second run must not inherit the first run's save budget
             _track_reset()
             _tube_grace_reset()
             last_plant_at, armed, driving_since = -1e9, True, None
@@ -1447,6 +1454,48 @@ def _cam_loop_run(url, held):
         _following = (_run["state"] == "running"
                       and (_run["mode"] == "scan"
                            or (_run["mode"] == "drip" and phase == "follow")))
+
+        # SUSPICIOUS ACCEPTS — a SCREEN, not a detector, and deliberately not a threshold I
+        # reasoned my way to. Everything else logged here records frames we REJECTED: the reject
+        # tally, the lost-frame dump, the LOST/REGAINED edges. A false positive is ACCEPTED, so it
+        # appears in none of them and produces no found->not-found edge either. It is structurally
+        # invisible, which is why the crossing-lateral false positive of 2026-08-18 could only be
+        # found offline against saved frames.
+        #
+        # MEASURED, over 700 real following frames (captures/dense, 408 accepted consecutive
+        # pairs), because my first two guesses at a trigger were both wrong:
+        #
+        #   |correction| is USELESS here. I assumed it ran -1..+1 and called the false positive's
+        #   -0.98 "near full-scale". The contract is -5..+5 (vision.py:287), and real following
+        #   frames have |corr| p50 1.59, p90 4.41. The false positive is BELOW the median. Same
+        #   trap as the gyro spike: magnitude cannot separate signal from noise here either.
+        #
+        #   The JUMP is better but not clean: p50 2.0px, p90 26.6px, p99 61.7px. The false
+        #   positive jumped 31.2px, which is 66% of the 47px gate at 19fps — p92, not an outlier.
+        #
+        # So ~9% of perfectly normal frames trip this. That is accepted deliberately: the SAVES
+        # are capped at 12, which is enough evidence to eyeball afterwards, and the counter keeps
+        # reporting past the cap. A screen that catches the event inside a manageable pile of
+        # frames beats an alarm tuned so tight it misses it. There is no single-frame test that
+        # separates a diagonal crossing lateral from a genuine leaning tube — the distinguishing
+        # fact is temporal — so do not expect one here.
+        _jump = abs((tube.get("x_near") or 0.0) - _hint) if (
+            _hint is not None and tube["found"]) else None
+        if _following and _jump is not None and _jump >= 0.6 * g["jump_px"]:
+            _susp_n += 1
+            if _susp_n <= 12:          # bounded: a bad row must not fill the board's disk
+                _shot = _save_named(frame, "suspect")
+                log("  SUSPECT ACCEPT [%s] jumped %.0fpx (%.0f%% of the %.0fpx gate) — "
+                    "x_near=%.0f x_far=%.0f corr %+.2f angle=%.1f fwhm=%s width=%s bands=%s. "
+                    "Either a real bend, or the detector moved to another feature; a crossing "
+                    "lateral does this (see tests/frames/negative)."
+                    % (_shot, _jump, 100.0 * _jump / g["jump_px"], g["jump_px"],
+                       tube.get("x_near") or 0.0, tube.get("x_far") or 0.0,
+                       tube.get("correction") or 0.0, tube.get("angle_deg") or 0.0,
+                       tube.get("width_fwhm"), tube.get("width"), tube.get("bands_raw")))
+            elif _susp_n == 13:
+                log("  SUSPECT ACCEPT: 12 frames saved, further ones counted only.")
+
         if not _following:
             tube_seen = None                  # next run starts clean, logs its first edge
         elif tube["found"] != tube_seen:
@@ -1930,7 +1979,11 @@ def _save_named(frame, tag):
     """Save one frame under a decision tag; return the filename (or "")."""
     try:
         os.makedirs(_CAP_DIR, exist_ok=True)
-        name = "%s_%s.jpg" % (tag, datetime.now().strftime("%H%M%S"))
+        # MILLISECONDS, not seconds. At 19fps several frames can be saved within one second —
+        # the suspect screen alone trips on ~9% of frames — and a second-resolution name means
+        # the later save SILENTLY overwrites the earlier one. Losing the frame that explains a
+        # failure, quietly, is the worst outcome for a file whose only job is evidence.
+        name = "%s_%s.jpg" % (tag, datetime.now().strftime("%H%M%S_%f")[:-3])
         cv2.imwrite(os.path.join(_CAP_DIR, name), frame)
         return name
     except Exception as e:                                    # noqa: BLE001
