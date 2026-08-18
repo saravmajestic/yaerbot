@@ -768,15 +768,48 @@ def _gates_str(g):
 # detector's. Measured across every real following frame: 38, 40, 46, 46, 62, 68, 70,
 # 70, 78 px. The false positive that sent the alignment loop chasing bare soil on
 # 2026-08-17 was 20px. The gap is wide enough to gate on and it costs nothing.
-_TUBE_MIN_W_PX   = 30
+# GATE ON width_fwhm, NOT width. `width` changes meaning depending on whether pair-centring
+# succeeded AND it is computed from the WHOLE-FRAME profile, which smears when the tube is
+# diagonal — so it collapsed exactly when the robot was off-heading and most needed to steer.
+# Measured over 2086 consecutive frames: `width` is bimodal (p10 14, median 44) while
+# `width_fwhm` is unimodal with median 14, which agrees with the independent measurement of the
+# 16mm tube as a ruler (13-21px across). The old `_TUBE_MIN_W_PX = 30` was therefore rejecting
+# 321 of 1010 good detections — 32% — including 4.2-sigma reads of a plainly visible tube.
+#
+# 5 is a floor against degenerate 1-2px "features", not a real discriminator. It costs 4% recall
+# against no gate at all (87% vs 91%) and keeps a sanity check. The actual protection against
+# false positives is three-layered and none of it is this number: strength >= 2.5, three-of-four
+# band agreement on a fitted line, and _track_tube's temporal jump gate.
+_TUBE_MIN_FWHM_PX = 5
 _TUBE_MIN_SIGMA  = 2.5
 _track = {"x": None, "rejects": 0, "last_ok": 0.0}
+# Which gate is throwing frames away, counted over the log window. THE POINT IS THE RATIO:
+# a run that halts constantly looks identical in the log whether the tube is genuinely absent
+# or a threshold is miscalibrated, and on 2026-08-18 it was the threshold — for a whole session.
+_reject_tally = {}
+
+
+def _tube_reject(tube):
+    """Why this reading is not usable, or None if it is. NAMES THE GATE THAT REJECTED IT.
+
+    Returning a bare boolean is what let a miscalibrated width gate discard 32% of good
+    detections through an entire field session: the log could only say "tube lost", and the
+    reason had to be reconstructed by comparing numbers printed beside it against a constant
+    the reader would have to go and look up. The caller aggregates these strings into a
+    histogram, so "94% of rejections were `width`" shows up in one run instead of three.
+    """
+    if not tube["found"]:
+        return tube.get("reject") or "not-found"
+    if (tube.get("width_fwhm") or 0) < _TUBE_MIN_FWHM_PX:
+        return "fwhm-%s<%d" % (tube.get("width_fwhm"), _TUBE_MIN_FWHM_PX)
+    if tube["strength"] < _TUBE_MIN_SIGMA:
+        return "sigma-%.1f<%.1f" % (tube["strength"], _TUBE_MIN_SIGMA)
+    return None
 
 
 def _tube_plausible(tube):
     """Is this reading the right SHAPE to be our tube, seen from our camera?"""
-    return (tube["found"] and (tube["width"] or 0) >= _TUBE_MIN_W_PX
-            and tube["strength"] >= _TUBE_MIN_SIGMA)
+    return _tube_reject(tube) is None
 
 
 def _track_reset():
@@ -830,9 +863,12 @@ def _track_tube(tube, w, now, max_jump_px):
     `max_jump_px` comes from _gates() rather than a constant, because how far the tube can
     plausibly move depends entirely on how long ago the last reading was taken.
     """
-    if not _tube_plausible(tube):
+    why = _tube_reject(tube)
+    if why is not None:
         _track["rejects"] = 0            # nothing to disagree with; do not count it
+        _reject_tally[why] = _reject_tally.get(why, 0) + 1
         out = dict(tube)
+        out["reject"] = why
         if tube["found"]:                # found, but not tube-shaped: say so
             out.update(found=False, correction=0.0, far_correction=0.0, implausible=True)
         return out
@@ -1182,6 +1218,16 @@ def _cam_loop_run(url, held):
             # bug this replaces was invisible precisely because nothing ever printed the
             # gate next to the frame interval that decides what it means.
             log("  gates: %s" % _gates_str(g))
+            # WHICH GATE IS DISCARDING FRAMES, as a ratio. "tube held 60%" tells you the robot
+            # is struggling; this tells you WHY, and it is the line that would have caught the
+            # width-gate bug on its first run instead of its fifth.
+            if _reject_tally:
+                tot = sum(_reject_tally.values())
+                top = sorted(_reject_tally.items(), key=lambda kv: -kv[1])[:4]
+                log("  rejects: %d in %.0fs — %s"
+                    % (tot, now - loop_t0,
+                       ", ".join("%s %d%%" % (k, round(100.0 * v / tot)) for k, v in top)))
+                _reject_tally.clear()
             # The worker's own numbers. `latency` is what the control loop USED to pay per
             # expiry and no longer does, so it is worth seeing; `skipped` being large is
             # healthy — it means inference is keeping up with the bus rather than falling
@@ -1256,12 +1302,16 @@ def _cam_loop_run(url, held):
                 # emitter detection structurally unreachable, and the log gave no hint of
                 # it. Reporting what the model saw here separates "the model found nothing"
                 # from "we never asked".
-                log("  lost-frame saved [%s] — detector said found=%s w=%s s=%.1f, "
-                    "emitter conf %.2f (not evaluated: no tube)%s"
-                    % (shot, tube.get("found"), tube.get("width"),
-                       tube.get("strength") or 0.0, emit.get("confidence") or 0.0,
-                       ", reading REJECTED as implausible" if tube.get("implausible")
-                       else (", jump rejected (x=%s)" % tube.get("rejected_x"))
+                # NAME THE GATE. "found=False w=12 s=4.2" required the reader to know that 12
+                # is compared against a constant called _TUBE_MIN_W_PX living 900 lines away.
+                # "REJECTED BY fwhm-4<5" does not.
+                log("  lost-frame saved [%s] — REJECTED BY %s | fwhm=%s width=%s(paired=%s) "
+                    "s=%.1f bands=%s | emitter conf %.2f (not evaluated: no tube)%s"
+                    % (shot, tube.get("reject") or "?", tube.get("width_fwhm"),
+                       tube.get("width"), tube.get("paired"),
+                       tube.get("strength") or 0.0, tube.get("bands_raw"),
+                       emit.get("confidence") or 0.0,
+                       ", jump rejected (x=%s)" % tube.get("rejected_x")
                        if tube.get("rejected_x") is not None else ""))
                 log("tube LOST — motors stopped. Run is STILL ACTIVE and will drive "
                     "again by itself when the tube is back in view; capture keeps "

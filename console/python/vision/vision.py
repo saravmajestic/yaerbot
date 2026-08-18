@@ -91,25 +91,43 @@ def _profile_line(gray, axis, bg_win=81, min_sigma=2.0, min_w=10, max_w=95,
     lo, hi = max(0, peak - pair_win), min(n, peak + pair_win + 1)
     partner_win = dev[lo:hi] * -sign
     partner = lo + int(np.argmax(partner_win))
+    # FULL WIDTH AT HALF MAX, always computed — this is the one that measures the FEATURE.
+    # Verified against the 16mm tube as a ruler (it reads 13-21px across in these frames), so
+    # FWHM is the physically meaningful number and it is now reported unconditionally.
+    half = mag[peak] * 0.5
+    l = peak
+    while l > 0 and mag[l - 1] > half:
+        l -= 1
+    r = peak
+    while r < n - 1 and mag[r + 1] > half:
+        r += 1
+    fwhm_centre, fwhm = (l + r) / 2.0, r - l + 1
+
     centre = width = None
+    paired = False
     if partner_win.max() > 1.2 * sigma:
         c, wd = (peak + partner) / 2.0, abs(partner - peak) * 2
         if min_w <= wd <= max_w:
-            centre, width = c, wd
+            centre, width, paired = c, wd, True
 
-    if centre is None:                             # no partner: full width at half max
-        half = mag[peak] * 0.5
-        l = peak
-        while l > 0 and mag[l - 1] > half:
-            l -= 1
-        r = peak
-        while r < n - 1 and mag[r + 1] > half:
-            r += 1
-        centre, width = (l + r) / 2.0, r - l + 1
+    if centre is None:                             # no partner: fall back to the FWHM
+        centre, width = fwhm_centre, fwhm
 
     if not (min_w <= width <= max_w):
         return None
+    # `width` IS NOT A PHYSICAL WIDTH AND MUST NOT BE GATED ON. It is |partner-peak|*2 when
+    # pair-centring succeeded and the FWHM when it did not, so the SAME tube at the SAME
+    # distance reports ~44-64px or ~12-20px depending purely on which branch ran. Measured
+    # over 2086 consecutive frames: min 12, p10 14, median 44, p90 64 — bimodal, and the two
+    # modes are the two code paths, not two tube sizes.
+    #
+    # That cost a whole field session on 2026-08-18: _TUBE_MIN_W_PX = 30 in main.py was
+    # calibrated on pair-centred frames only, so it was silently gating on "did pair-centring
+    # succeed" rather than "is this plausibly a tube". Frames with the tube plainly visible and
+    # all four bands correctly on it, at 4.2-5.9 sigma, were thrown away for reporting w=12.
+    # `width_fwhm` is the number to gate on; `paired` says which branch produced `width`.
     return {"pos": float(centre), "width": int(width),
+            "width_fwhm": int(fwhm), "paired": paired,
             "strength": round(float(mag[peak] / sigma), 2),
             "polarity": "bright" if sign > 0 else "dark"}
 
@@ -137,7 +155,36 @@ def _profile_line(gray, axis, bg_win=81, min_sigma=2.0, min_w=10, max_w=95,
 # The robot's own shadow falling across the view is a PHYSICAL problem: it moves with the sun
 # and will not hold still for a threshold. Fix it by keeping the shadow out of frame, or by
 # lighting the scene. See docs/usb-camera.md.
-_MIN_BANDS = 4
+#
+# CHANGED 4 -> 3 on 2026-08-18, on 2086 CONSECUTIVE frames (26.3fps, one unbroken 81-second
+# pass) instead of the 20 scattered frames the old value was chosen on. The old measurement was
+# not wrong about its own frames; it was measured through main.py's width gate, which turned
+# out to be broken, so both numbers were confounded.
+#
+#   bands  gate                recall   longest blind run   halts   dx_med  dx_p95
+#     4    width >= 30           33%        6.57s            37      2.0    18.0
+#     3    width_fwhm >= 5       87%        1.10s             9      2.0    36.2
+#     3    (no width gate)       91%        0.46s             7      2.0    34.5
+#
+# Rejections at 4 bands were dominated by `line-fit-3-of-4`: 863 frames — 41% OF THE WHOLE PASS
+# — had exactly three of four bands on a line and were thrown away. The tube is visible in them
+# and the bands are on it.
+#
+# WHY THIS IS SAFE WITHOUT LABELS. dx_med (the tube's apparent movement between consecutive
+# accepted frames) stays at 2.0px in every configuration above. If relaxing the gate were
+# admitting soil and shadow, the accepted positions would scatter and that number would climb.
+# It does not — the extra detections are temporally coherent, which is what a real tube looks
+# like and what a false positive cannot fake. The p95 tail DOES grow, 18 -> 36px, and that is
+# precisely what _track_tube's jump gate (~30px at 30fps) exists to catch: relax the per-frame
+# detector, let the temporal gate handle the tail.
+#
+# WHAT THIS MEASUREMENT CANNOT SAY. The pass contains no non-tube scenes, so it does not
+# measure the false-positive rate on bare soil — which is what justified 4 bands originally
+# (4 false positives in 11 non-tube frames). Two things bound that risk now: `detect_crossing`
+# does NOT use _MIN_BANDS at all, so the traverse latch that decides a row change is unaffected;
+# and the remaining consumer is _turn_onto_tube's alignment loop, which is capped at 6 nudges
+# and hands over to the follow loop regardless.
+_MIN_BANDS = 3
 
 # AXIS-DOMINANCE TEST: REMOVED 2026-08-18. It compared the strength of the whole-frame
 # vertical profile against the horizontal one, to avoid claiming a crossing tube as the row
@@ -162,7 +209,7 @@ _MIN_BANDS = 4
 
 
 def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
-                max_line_dev_px=22, **kw):
+                max_line_dev_px=22, max_angle_deg=35.0, **kw):
     """Find the drip line being followed (near-vertical) and return a steering correction.
 
     Returns dict:
@@ -187,8 +234,14 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
     h, w = frame.shape[:2]
     gray = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0)
     whole = _profile_line(gray, 0, **kw)
+    # EVERY REJECTION SAYS WHICH STAGE REJECTED IT. Returning a bare found=False forced the
+    # operator's log to read "tube lost" and left the reason to be reconstructed from numbers
+    # printed beside it — which is how a width gate rejecting 4.2-sigma detections of a plainly
+    # visible tube went unnoticed through a whole field session. The caller aggregates these
+    # into a histogram, so "94% of rejections were `width`" is visible in one run.
     none = {"found": False, "correction": 0.0, "offset_px": None, "tube_x": None,
-            "angle_deg": None, "width": None, "strength": 0.0, "polarity": None}
+            "angle_deg": None, "width": None, "width_fwhm": None, "paired": False,
+            "strength": 0.0, "polarity": None, "reject": "no-profile"}
     if whole is None:
         return none
     # TWO PASSES, and they do different jobs. Measured on 20 real frames, each pass alone
@@ -233,7 +286,11 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
     # ruined by shadow is EXTRAPOLATED THROUGH rather than either trusted or fatal.
     pts = [(ys_all[i], indep[i]) for i in range(bands) if indep[i] is not None]
     if len(pts) < _MIN_BANDS:
-        return none
+        # Measured over 2086 consecutive frames: this fires on 3% of them. The bands almost
+        # always FIND something — it is agreement, below, that is hard.
+        return dict(none, reject="bands-found-%d" % len(pts),
+                    width=whole["width"], width_fwhm=whole["width_fwhm"],
+                    strength=whole["strength"], polarity=whole["polarity"])
 
     best = None                               # (inlier count, -residual, slope, intercept)
     for a in range(len(pts)):
@@ -249,7 +306,11 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
             if best is None or score > best[0]:
                 best = (score, m, c)
     if best is None or best[0][0] < _MIN_BANDS:
-        return none
+        return dict(none,
+                    reject="line-fit-%d-of-%d" % (0 if best is None else best[0][0], len(pts)),
+                    bands_raw=[None if v is None else round(v, 1) for v in indep],
+                    width=whole["width"], width_fwhm=whole["width_fwhm"],
+                    strength=whole["strength"], polarity=whole["polarity"])
     n_inliers = best[0][0]
     _, m, c = best
 
@@ -261,6 +322,32 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
     # uses far and near offsets directly, which carry the same sign convention as
     # `correction` and so cannot be got backwards.
     angle = round(float(np.degrees(np.arctan2(x_near - x_far, ys[-1] - ys[0]))), 1)
+
+    # THE ROW RUNS TOP-TO-BOTTOM. This gate replaces the axis-dominance test removed on
+    # 2026-08-18, and it is the constraint that makes _MIN_BANDS=3 safe.
+    #
+    # Why the replacement was needed: a 3-of-4 robust fit is a WEAK geometric constraint. With
+    # four scattered band positions there are 12 chances (6 pairs x 2 remaining points) for some
+    # pair's line to pass within max_line_dev_px of a third, so it accepts pure scatter most of
+    # the time. Measured on a synthetic HORIZONTAL line — the one thing detect_tube must never
+    # claim, or the robot turns onto the row it is already following — bands came back
+    # [280.5, 219.5, 49.0, 117.0] and a 3-inlier fit "succeeded".
+    #
+    # Residual magnitude does NOT separate the two (chance fits 3.8-15.8px max residual, real
+    # 3-inlier fits median 5.8 / p90 16.0 — complete overlap). ANGLE does, cleanly:
+    #     real tube, 1919 accepted frames: p50 6.7  p75 12.9  p90 18.4  p95 23.6  p99 34.6 deg
+    #     the horizontal negatives that got through: -42.2 and 51.8 deg
+    # 35 deg keeps 99.1% of real frames and rejects both.
+    #
+    # Unlike the axis test this operates on the FITTED LINE, not on a whole-frame profile — so
+    # it cannot fail the way that test did, where a diagonal tube smeared to 3.4 sigma and lost
+    # to a crisp band of straw.
+    if abs(angle) > max_angle_deg:
+        return dict(none, reject="angle-%.0f>%.0f" % (abs(angle), max_angle_deg),
+                    angle_deg=angle, bands_used=n_inliers,
+                    bands_raw=[None if v is None else round(v, 1) for v in indep],
+                    width=whole["width"], width_fwhm=whole["width_fwhm"],
+                    strength=whole["strength"], polarity=whole["polarity"])
 
     def _corr(x):
         return round(float(np.clip((x - w / 2.0) / (w / 2.0) * 5.0, -5, 5)), 2)
@@ -278,6 +365,10 @@ def detect_tube(frame, bands=4, max_drift_px=45, max_step_px=40,
             "bands_x": [round(v, 1) for v in xs], "bands_used": n_inliers,
             "bands_raw": [None if v is None else round(v, 1) for v in indep],
             "angle_deg": angle, "width": whole["width"],
+            # width_fwhm is the PHYSICAL width (see _profile_line) and the one to gate on;
+            # `width` is bimodal because it changes meaning with `paired`.
+            "width_fwhm": whole["width_fwhm"], "paired": whole["paired"],
+            "reject": None,
             "strength": whole["strength"], "polarity": whole["polarity"]}
 
 

@@ -24,8 +24,11 @@ SLOW = 0.710         # ESP32-CAM, measured 1.4 fps
 
 
 def _tube(found=True, x=160.0, corr=1.0, far=1.5):
+    # width_fwhm is what _tube_reject gates on now, NOT width — see the width-gate finding of
+    # 2026-08-18. 14 is the measured median over 2086 real frames.
     return {"found": found, "tube_x": x, "x_near": x, "correction": corr,
-            "far_correction": far, "width": 58, "strength": 3.6, "angle_deg": 0.0,
+            "far_correction": far, "width": 44, "width_fwhm": 14, "paired": True,
+            "strength": 3.6, "angle_deg": 0.0, "reject": None,
             "offset_px": x - 160.0}
 
 
@@ -385,6 +388,36 @@ def test_the_capture_interval_can_be_set_without_restarting_capture():
     assert m._capture["interval"] == 0.0, \
         "scan-mode auto-capture must use the operator's interval, not overwrite it"
     h["run_stop"](None, {})
+
+
+def test_rejections_are_tallied_by_reason_so_the_log_can_name_the_gate():
+    """The diagnostic that would have caught the width-gate bug on its first run.
+
+    "tube held 33% of frames" tells you the robot is struggling and nothing about why — a
+    miscalibrated threshold and a genuinely absent tube look identical. On 2026-08-18 it was
+    the threshold, for a whole session. A ratio per reason turns that into one line.
+    """
+    m = _load_main()
+    m._reject_tally.clear()
+    m._track_reset()
+    g = m._gates(FAST)
+    now = 1000.0
+
+    # a reading the fwhm gate must reject, and it must be counted under a name that says so
+    thin = _tube()
+    thin["width_fwhm"] = 1
+    m._track_tube(thin, 320, now, g["jump_px"])
+    assert m._reject_tally, "a rejected reading was not tallied"
+    key = next(iter(m._reject_tally))
+    assert key.startswith("fwhm-"), "tallied under %r, which does not name the gate" % key
+
+    # a different gate must land in a different bucket, or the histogram cannot apportion blame
+    weak = _tube()
+    weak["strength"] = 0.1
+    m._track_tube(weak, 320, now + FAST, g["jump_px"])
+    assert len(m._reject_tally) == 2, "reasons collapsed together: %r" % m._reject_tally
+    assert any(k.startswith("sigma-") for k in m._reject_tally)
+    m._reject_tally.clear()
 
 
 def test_dense_capture_does_not_flood_the_operator_socket():
