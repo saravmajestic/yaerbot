@@ -680,6 +680,32 @@ Then re-deploy the `motor-control` app. The **Reboot** and **Shutdown** buttons 
 
 ---
 
+## [Camera] The ESP32-CAM was delivering 0.7-6.7 fps — replaced by a USB webcam (2026-08-18)
+
+Three days of "course correction is broken" turned out to be the camera. Measured with the
+robot app STOPPED and curl straight from a laptop, so no project code in the path:
+
+    ESP32-CAM MJPEG:  11 frames in 8s = 1.4 fps, and variable 0.7-6.7 fps
+    a single /capture: 2.75 s
+    ping:              125 ms avg, 11 ms min, 300 ms peak
+
+At 0.17 m/s that is 12-24 cm of ground per control measurement. Every steering gain, lookahead
+weight and detector threshold tuned before this was fitting a loop that saw the world once per
+quarter-metre. **Measure the camera's frame rate before tuning anything downstream of it** —
+this cost days.
+
+Also note the rate was NOT a fixed limit: the same camera hit 5.5 fps at times, tracking WiFi
+latency. Averaging it into "a 1.4 fps camera" was wrong. Variable is worse than slow.
+
+Switching the board to its own hotspot made it WORSE (1659 ms ping), so it was not congestion
+on the house WiFi.
+
+**Fix:** a Logitech C310 on USB, straight into the UNO Q -> 29.8 fps steady, no truncated
+frames, no single-client limit, no WiFi. Full recipe, including why a passive USB-C OTG
+adapter cannot work on this board and what does, in **`docs/usb-camera.md`**.
+
+---
+
 ## [Camera] ESP32-CAM won't stay connected — brownout loop (POWERON_RESET)
 
 **Symptom:** cam is "powered" but never shows up on the network / the operator Cam tab stays blank. Serial (or `/log`) shows it boot, reach `WiFi connecting`, then reset — repeatedly. Reset reason cycles `POWERON_RESET` (not a clean watchdog reset).

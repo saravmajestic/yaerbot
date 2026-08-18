@@ -173,8 +173,31 @@ void setup() {
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
       config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
+      // fb_count STAYS 1 AND grab_mode STAYS WHEN_EMPTY — deliberately not the stock
+      // CameraWebServer values (2 / CAMERA_GRAB_LATEST), which are the documented cause of
+      // the green patches we chased on 2026-08-17.
+      //
+      // app_httpd.cpp streams `_jpg_buf = fb->buf` — the frame buffer ITSELF, not a copy.
+      // With two buffers and GRAB_LATEST the driver keeps capturing while that send is in
+      // flight and can overwrite the buffer being transmitted, so the JPEG goes out half
+      // old frame, half new. The bitstream turns invalid partway, the decoder stops there,
+      // and everything after decodes from a zero-filled YUV buffer — which is RGB(0,135,0),
+      // pure green. Measured on a truncated frame through OpenCV/FFmpeg: bottom row BGR
+      // (0,137,0) against the predicted (0,135,0).
+      //
+      // espressif/esp32-camera#417: "esp_camera_fb_return tells the camera driver that it's
+      // free to re-use the memory ... that shows up as corruption while you send out the
+      // old picture and the driver is already writing a new picture there."
+      // espressif/esp32-camera#252 corroborates: ~5% of frames lack the end-of-image
+      // marker, i.e. the CAMERA emits incomplete JPEGs — no packet loss required, which is
+      // why this happened at RSSI -20 with the robot standing still.
+      //
+      // With ONE buffer the driver cannot capture into another while we send: it waits for
+      // esp_camera_fb_return. Costs the double-buffered frame rate, which at QVGA we do not
+      // need. The alternative fix is to memcpy out of fb->buf before sending (also in #417)
+      // if the frame rate ever matters more than the RAM.
+      config.fb_count = 1;
+      config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     } else {
       // Limit the frame size when PSRAM is not available
       config.frame_size = FRAMESIZE_SVGA;

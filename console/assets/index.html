@@ -228,16 +228,27 @@
         <div class="card">
           <h2>Camera</h2>
           <div class="row">
-            <!-- mDNS name, not an IP: the cam's address changes with the network it
-                 joins (home WiFi vs the field hotspot), the name doesn't. -->
-            <input type="text" id="cam-url" class="cam-input" value="farmcam.local" placeholder="cam IP or farmcam.local">
+            <!-- Either a USB camera or the WiFi cam:
+                   usb            -> find the USB webcam automatically (30 fps, no WiFi)
+                   farmcam.local  -> ESP32-CAM MJPEG stream
+                 Use `usb`, NOT a number: the /dev/video index is not stable. Verified
+                 2026-08-18 — the camera was video2 on one boot, and after unplugging it to
+                 mount it, it came back as video0 while video2 became the H.264 encoder.
+                 For the WiFi cam use the mDNS NAME, not an IP: its address changes with the
+                 network it joins, the name doesn't. -->
+            <input type="text" id="cam-url" class="cam-input" value="usb" placeholder="usb, or farmcam.local">
             <button class="btn-wide net" id="cam-set">Connect</button>
           </div>
+          <p class="hint">USB camera: enter <b>usb</b> — it finds the camera by capability,
+            because the <code>/dev/video</code> index moves between the webcam and the
+            board's hardware codec across replugs. WiFi camera: <b>farmcam.local</b>.
+            Frames are always 320&times;240 — every detector threshold is calibrated at that
+            size, and the USB camera streams it natively.</p>
         </div>
 
         <div class="cam-view" id="cam-view">
           <img id="cam-feed" alt="camera feed">
-          <div class="cam-hint" id="cam-hint">Connect to the camera (farmcam.local) to see the annotated feed.</div>
+          <div class="cam-hint" id="cam-hint">Connect to the camera (type <b>usb</b>, or farmcam.local) to see the annotated feed.</div>
         </div>
 
         <div class="card">
