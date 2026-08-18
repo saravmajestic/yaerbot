@@ -266,8 +266,13 @@
           <h2>Dataset capture <span id="cap-count" class="cap-count">0</span>
             <button class="cap-clear" id="cap-clear">Clear</button></h2>
           <div class="field">
-            <label>Interval: <span id="cap-int-val">2</span>s</label>
-            <input type="range" id="cap-int" min="0.5" max="10" step="0.5" value="2">
+            <!-- 0 = save EVERY frame (~30/s). Needed for two things a 2s interval cannot do:
+                 catching each emitter several times as it crosses the frame, and producing
+                 CONSECUTIVE frames to validate temporal filtering against. A minute of it is
+                 ~32MB. Subsample before uploading to Edge Impulse — near-duplicates leak
+                 across the train/test split. -->
+            <label>Interval: <span id="cap-int-val">2</span>s <span class="hint">(0 = every frame)</span></label>
+            <input type="range" id="cap-int" min="0" max="10" step="0.5" value="2">
           </div>
           <div class="row">
             <button class="btn-wide start" id="cap-start">● Start capture</button>

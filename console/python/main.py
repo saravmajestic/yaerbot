@@ -396,9 +396,39 @@ _TRAVERSE_NEAR    = 0.60   # `nearness` at which the tube is close enough to tur
 # agreement, keep a short history and require the trend: several sightings within a couple
 # of seconds whose y has grown. Dropouts no longer reset anything; they just thin the
 # history.
-_TRAVERSE_TRACK_S     = 2.5   # how much sighting history counts as "recent"
-_TRAVERSE_MIN_SIGHTS  = 4     # sightings needed inside that window
-_TRAVERSE_APPROACH_PX = 25    # y must have grown by this much across the window
+#
+# RE-EXPRESSED IN DISTANCE, 2026-08-18. The old rule was "4 sightings within 2.5s, y grown
+# 25px". At 1.4fps a 2.5s window held ~3.5 frames, so "4 sightings" demanded essentially
+# EVERY frame agree — a strong test. At 30fps the same window holds 75 frames, so it asks for
+# a 5% hit rate, and 25px of growth over 42cm of driving is 2.3cm of approach, which sensor
+# noise clears on its own. The gate that decides the robot turns onto a row had become close
+# to free to satisfy, and it is not recoverable by a later frame: turn onto the wrong thing
+# and the run is over.
+#
+# So: a window measured in METRES DRIVEN, sightings as a FRACTION of the frames in it, and
+# the growth checked against what the geometry says it should be. A lateral the robot is
+# driving at sweeps down the frame at _PX_PER_M_DEPTH px per metre; soil artefacts do not
+# advance with distance at all. Requiring a quarter of the geometric expectation is loose
+# enough for a noisy band and still rejects anything static.
+_TRAVERSE_WINDOW_M       = 0.35   # trailing distance that counts as "recent"
+_TRAVERSE_MIN_SIGHT_FRAC = 0.35   # of the frames in that window
+_TRAVERSE_MIN_SIGHTS     = 3      # absolute floor, so 1-of-2 frames cannot pass on fraction
+_TRAVERSE_APPROACH_FRAC  = 0.25   # of the growth the geometry predicts for the distance
+_TRAVERSE_APPROACH_PX_MIN = 6     # absolute floor, kept as a guard (see below)
+# MINIMUM GROUND OVER WHICH THE BAND MUST HAVE BEEN WATCHED before approach is judged at all.
+# Without this the scaled requirement collapses to its px floor over a very short span, and a
+# unit test caught the consequence: three sightings 3mm apart with 6px of sensor wobble
+# satisfied "grew >= need_px" exactly and the latch fired. The answer is not a bigger px floor
+# but refusing to answer — 3mm of driving is not evidence about anything. At 5cm the geometry
+# predicts 54px of sweep, so the requirement becomes 14px and noise cannot reach it.
+_TRAVERSE_MIN_SPAN_M     = 0.05
+#
+# NOTE the requirement GROWS with the sighting span and is deliberately NOT capped. Capping it
+# would make a longer observation an easier test, which is backwards: the longer we have been
+# watching something, the more it must have moved to still be a lateral we are driving at.
+# Sanity check on the numbers — we latch at nearness 0.60, i.e. y=144, so a band tracked from
+# the top of frame gives a span of about 144/1090 = 0.13m and a requirement of 36px against
+# 144px of real growth. Comfortable margin for a real lateral; a static artefact grows 0.
 _ARM_DWELL_S  = 0.6
 # plantSeed on the MCU is drop(500) + settle(100) + punch(500) + fill(400) = 1.5s.
 # A dry run sleeps the same so its timing matches a real run.
@@ -420,6 +450,41 @@ def _min_replant():
     return max(_MIN_REPLANT_M, 0.5 * gap)
 
 
+def _traverse_track(hist, traversed, cross):
+    """Add this frame to the crossing history and decide whether one is APPROACHING.
+
+    Pure and side-effect free (it returns a new history) specifically so the latch that
+    decides the robot turns onto a row can be unit-tested. It could not be before: it lived
+    inline in the camera loop, which needs a board, so the only way to exercise it was a
+    field run — and a field run is exactly where a wrong answer is expensive.
+
+    Returns (history, info).
+
+    EVERY frame goes into the history, sighting or not, so the sighting FRACTION is
+    measurable. The old history kept only sightings, which is why 4-of-75 frames looked
+    identical to 4-of-4 and the test silently weakened by 20x when the camera got faster.
+    """
+    hist = list(hist)
+    hist.append((traversed, cross["tube_y"] if cross["found"] else None))
+    hist = [s for s in hist if traversed - s[0] <= _TRAVERSE_WINDOW_M]
+    sights = [s for s in hist if s[1] is not None]
+    frac = len(sights) / float(len(hist)) if hist else 0.0
+    span_m = (sights[-1][0] - sights[0][0]) if len(sights) >= 2 else 0.0
+    grew = (sights[-1][1] - sights[0][1]) if len(sights) >= 2 else 0.0
+    # What the geometry says a real approaching lateral must have moved over span_m. A band
+    # that is really coming towards the robot sweeps down the frame at _PX_PER_M_DEPTH px per
+    # metre driven; a shadow or a straw does not advance with distance at all.
+    need_px = max(_TRAVERSE_APPROACH_PX_MIN,
+                  _TRAVERSE_APPROACH_FRAC * span_m * _PX_PER_M_DEPTH)
+    approaching = (len(sights) >= _TRAVERSE_MIN_SIGHTS
+                   and span_m >= _TRAVERSE_MIN_SPAN_M
+                   and frac >= _TRAVERSE_MIN_SIGHT_FRAC
+                   and grew >= need_px)
+    return hist, {"approaching": approaching, "sights": len(sights),
+                  "frames": len(hist), "frac": frac, "grew": grew,
+                  "span_m": span_m, "need_px": need_px}
+
+
 def _traverse_max():
     """How far to search for the next lateral before giving up.
 
@@ -436,6 +501,21 @@ def _traverse_max():
 _FRAME_MAX_AGE_S = 0.25   # unused: superseded by bus.stale_after(), which MEASURES the
                           # camera's real frame interval instead of assuming one
 _EMIT_TTL_S = 0.30
+# DELIBERATELY NOT TIGHTENED, and the arithmetic is why. Inference costs 70-90ms; at a 33ms
+# frame interval, running it on a 2cm budget (0.118s at 0.170 m/s) would spend 80ms of every
+# 118ms inside the model — 68% duty — and collapse the steering rate back to ~9Hz, which is
+# the exact problem this cache was introduced to solve. Rate-decoupling is the right call; the
+# defect was never the TTL itself.
+#
+# The real defect is what the stale box was USED FOR. That cached `y` sets the creep distance
+# via _emitter_ground_m, so a 0.3s-old box misplaces the seed by up to 5cm — and seed
+# placement is one of the two decisions in this robot that no later frame can correct.
+# So: when the box is staler than this, RE-RUN INFERENCE ON A FRESH FRAME at the moment of the
+# stop, and use that. The robot is stationary by then, so the inference costs nothing it needs.
+# Falls back to the cached box if the fresh look finds nothing, so this can only ever improve
+# the estimate — it can never skip an emitter that the old code would have planted.
+# Phase 3 removes the cache entirely by moving inference to its own thread off the FrameBus.
+_EMIT_MAX_STALE_M = 0.02
 _emit_cache = {"t": 0.0, "res": None}
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
@@ -579,9 +659,51 @@ _STEER_W_FAR = 0.5
 # accepted column and rejects anything that jumps further than the robot could have
 # moved; after enough consecutive rejections it gives up and re-acquires, so a genuine
 # re-acquisition after losing the tube still works.
-_TRACK_MAX_JUMP_PX = 70     # per frame at ~10fps; a real tube drifts, it does not teleport
+#
+# THESE GATES ARE DERIVED, NOT WRITTEN DOWN. See _gates().
+#
+# The bug this fixes is not a wrong number, it is a wrong UNIT. Every gate here used to be
+# a count of seconds or pixels chosen when the ESP32-CAM delivered a frame every ~710ms.
+# The USB camera delivers one every ~33ms, so each of them silently changed meaning by 21x
+# the day the camera was swapped, and nothing failed loudly:
+#
+#   _TRACK_MAX_JUMP_PX = 70   sized for 12-24cm of travel between frames. At 0.57cm it
+#                             rejects nothing at all — the backstop against the tube column
+#                             teleporting (233 -> 290 -> 158 -> 61) had quietly gone inert.
+#   _TRAVERSE_MIN_SIGHTS = 4  over 2.5s. At 1.4fps that is ~every frame in the window and a
+#                             strong test; at 30fps it is 4 sightings in 75 frames, a 5% hit
+#                             rate — and that latch decides the robot turns onto a row.
+#   _TUBE_GRACE_S = 0.4       12 frames. At a 27% miss rate the chance of 12 consecutive
+#                             misses is ~1e-6, so the "tube genuinely lost -> stop" fail-safe
+#                             could never fire.
+#
+# So the gates are now expressed in the units the ROBOT cares about — metres of ground and
+# frames of evidence — and converted to seconds/pixels at run time from the camera's MEASURED
+# interval. A future camera change re-derives them instead of re-breaking them.
 _TRACK_RELOCK_N    = 6      # consecutive rejects before believing the new position
 _TRACK_STALE_S     = 1.5    # no accepted reading for this long -> accept the next one
+
+# Vertical image scale, MEASURED 2026-08-18 using the 16mm drip tube as a ruler of known
+# width in every frame: the tube reads 20.9px across at the bottom row (0.76 mm/px) and
+# 13.0px at the top (1.23 mm/px). A 22cm strip over 240 rows implies 1.19 mm/px mean, which
+# agrees — so the frame geometry in _emitter_ground_m is sound and this is a real scale, not
+# a guess. Used to convert "how far has the crossing band moved" into "how far did we drive".
+_PX_PER_M_DEPTH = 1090.0
+
+# HOW FAR THE TUBE COLUMN MAY MOVE, per second of elapsed time rather than per frame.
+# 900 px/s puts the gate at ~30px at 30fps and pins it to the ceiling on a slow camera, so
+# both cameras get a real test instead of one getting none.
+#
+# THE FLOOR IS THE INTERESTING PART. Physical motion at 30fps is only ~7.5px (5.7mm of travel
+# at 0.76 mm/px), so it is tempting to gate at 10px. Measured against 45 real detections, the
+# detector's OWN position noise is p90 7.5px, p99 18.8px, max 22.0px — the measurement is
+# NOISIER THAN THE MOTION. Gating below ~25px would therefore reject good frames on noise, and
+# no amount of controller tuning recovers a reading that was thrown away. The ceiling is 90px
+# because the tube's x_near spanned only 78..229 across an entire run, so a 90px step is
+# already most of the operating range.
+_TRACK_JUMP_PX_PER_S = 900.0
+_TRACK_JUMP_PX_MIN   = 25
+_TRACK_JUMP_PX_MAX   = 90
 # HOW LONG A DETECTION GAP TO DRIVE THROUGH before stopping.
 # The detector achieves 69% on real captures (measured over 80 frames, 2026-08-18) — the 31%
 # it misses are frames where the robot's own shadow corrupts one of the four bands, and five
@@ -595,8 +717,51 @@ _TRACK_STALE_S     = 1.5    # no accepted reading for this long -> accept the ne
 #
 # This is a tolerance, not a blindfold: past the grace period the robot still stops, which is
 # what protects it when the tube genuinely leaves the view.
-_TUBE_GRACE_S = 0.4
-_tube_hold = {"t": 0.0, "tube": None}
+# Expressed as GROUND DISTANCE plus a cap in FRAMES, whichever runs out first — the two
+# things that actually matter, neither of which changes when the camera does.
+#
+# 0.035m at 0.170 m/s is 0.21s, which at 30fps is ~6 frames. The 6-frame cap agrees, and is
+# what bounds it on a faster camera. Six consecutive misses at the measured 27% miss rate has
+# probability 0.27^6 = 4e-4, so the grace absorbs shadow gaps while a genuine loss still stops
+# the robot within ~3.5cm. The old 0.4s let it drive 6.8cm on a reading that never expired.
+_TUBE_GRACE_M          = 0.035
+_TUBE_GRACE_MAX_MISSES = 6
+# A held reading used to be replayed IDENTICALLY every frame, which is not "carrying a
+# measurement through a gap" — it is a 0.4s open-loop turn at whatever differential the last
+# good frame asked for. The held correction now decays to zero across the grace window, so the
+# robot straightens as its information goes stale instead of committing harder to it.
+_tube_hold = {"t": 0.0, "tube": None, "misses": 0}
+
+
+def _gates(interval=None):
+    """Every frame-rate-dependent gate, derived from the camera's MEASURED frame interval.
+
+    Called with bus.interval(); falls back to a conservative 100ms before two frames have
+    arrived. _DRIP_SPEED_MPS is read here rather than at module level on purpose — it is
+    defined further down the file, and a module-level reference to it would be exactly the
+    import-ordering bug that tests/test_console_imports.py exists to catch.
+    """
+    iv = interval if (interval and interval > 0) else 0.10
+    v = max(0.01, _DRIP_SPEED_MPS)
+    return {
+        "interval": iv,
+        # how far the tube column may jump between readings
+        "jump_px": max(_TRACK_JUMP_PX_MIN,
+                       min(_TRACK_JUMP_PX_MAX, _TRACK_JUMP_PX_PER_S * iv)),
+        # how long to carry a lost reading: a distance budget, but never less than one
+        # frame's worth or a slow camera would expire the grace before it could ever help
+        "grace_s": max(iv * 1.5, _TUBE_GRACE_M / v),
+        "grace_misses": _TUBE_GRACE_MAX_MISSES,
+        # how far the emitter box may be out of date before it stops setting the creep
+        "emit_stale_m": _EMIT_MAX_STALE_M,
+    }
+
+
+def _gates_str(g):
+    return ("frame %.0fms | tube jump <=%.0fpx | grace %.0fms or %d misses (%.1fcm) | "
+            "emit stale <=%.0fcm"
+            % (g["interval"] * 1000, g["jump_px"], g["grace_s"] * 1000, g["grace_misses"],
+               100 * g["grace_s"] * _DRIP_SPEED_MPS, 100 * g["emit_stale_m"]))
 # PLAUSIBLE FOR THIS CAMERA. The detector reports what the profile says; how wide the
 # tube can look from this camera at this height is the robot's knowledge, not the
 # detector's. Measured across every real following frame: 38, 40, 46, 46, 62, 68, 70,
@@ -617,29 +782,53 @@ def _track_reset():
     _track.update(x=None, rejects=0, last_ok=0.0)
 
 
-def _tube_with_grace(tube, now):
-    """Carry the last good reading through a brief detection gap.
+def _tube_with_grace(tube, now, gates):
+    """Carry the last good reading through a brief detection gap, with DECAY.
 
     Returns (tube, holding) — `holding` is True when this is a remembered reading rather
     than a fresh one, so the caller can log it and decide how much to trust it.
+
+    Two bounds, whichever runs out first: a ground-distance budget and a count of
+    consecutive missed frames. The frame count is what protects a fast camera (where the
+    distance budget is many frames) and the distance is what protects a slow one.
+
+    The correction DECAYS linearly to zero across the window. Replaying the last command
+    unchanged, as this used to, means the robot keeps turning at full commanded rate on
+    information it no longer has — the longer it is blind the harder it commits. Decaying
+    means it straightens as the reading ages, so the worst case is driving straight rather
+    than driving in a circle.
     """
     if tube["found"]:
-        _tube_hold["t"], _tube_hold["tube"] = now, tube
+        _tube_hold.update(t=now, tube=tube, misses=0)
         return tube, False
     held = _tube_hold["tube"]
-    if held is not None and (now - _tube_hold["t"]) <= _TUBE_GRACE_S:
-        out = dict(held)
-        out["held_for"] = round(now - _tube_hold["t"], 2)
-        return out, True
-    return tube, False
+    if held is None:
+        return tube, False                    # never seen the tube: do not drive on nothing
+    age = now - _tube_hold["t"]
+    _tube_hold["misses"] += 1
+    if age > gates["grace_s"] or _tube_hold["misses"] > gates["grace_misses"]:
+        return tube, False
+    k = max(0.0, 1.0 - age / max(1e-6, gates["grace_s"]))
+    out = dict(held)
+    out["correction"] = round((held.get("correction") or 0.0) * k, 3)
+    if held.get("far_correction") is not None:
+        out["far_correction"] = round(held["far_correction"] * k, 3)
+    out["held_for"] = round(age, 3)
+    out["held_misses"] = _tube_hold["misses"]
+    out["held_decay"] = round(k, 2)
+    return out, True
 
 
 def _tube_grace_reset():
-    _tube_hold["t"], _tube_hold["tube"] = 0.0, None
+    _tube_hold.update(t=0.0, tube=None, misses=0)
 
 
-def _track_tube(tube, w, now):
-    """Accept, reject or re-acquire this frame's tube reading."""
+def _track_tube(tube, w, now, max_jump_px):
+    """Accept, reject or re-acquire this frame's tube reading.
+
+    `max_jump_px` comes from _gates() rather than a constant, because how far the tube can
+    plausibly move depends entirely on how long ago the last reading was taken.
+    """
     if not _tube_plausible(tube):
         _track["rejects"] = 0            # nothing to disagree with; do not count it
         out = dict(tube)
@@ -649,7 +838,7 @@ def _track_tube(tube, w, now):
     x = tube["tube_x"]
     prev = _track["x"]
     stale = (now - _track["last_ok"]) > _TRACK_STALE_S
-    if prev is None or stale or abs(x - prev) <= _TRACK_MAX_JUMP_PX \
+    if prev is None or stale or abs(x - prev) <= max_jump_px \
             or _track["rejects"] >= _TRACK_RELOCK_N:
         _track.update(x=x, rejects=0, last_ok=now)
         return tube
@@ -937,8 +1126,12 @@ def _cam_loop_run(url, held):
         # ordered first it was read before it was ever assigned, so the loop died with
         # UnboundLocalError on its FIRST fresh frame and took the camera down with it
         # (2026-08-18 — see the guard on _cam_loop for the other half of that failure).
-        tube = _track_tube(detect_tube(frame), w, now=now)
-        tube, holding = _tube_with_grace(tube, now)
+        # DERIVE THE GATES FROM WHAT THE CAMERA IS ACTUALLY DOING, every frame. Cheap
+        # arithmetic, and it means a camera that slows down (or is swapped) re-tunes the
+        # plausibility limits instead of silently invalidating them.
+        g = _gates(bus.interval())
+        tube = _track_tube(detect_tube(frame), w, now=now, max_jump_px=g["jump_px"])
+        tube, holding = _tube_with_grace(tube, now, g)
         # Loop rate, logged while a run is active. The whole point of decoupling the
         # emitter model was to raise this, so it should be visible rather than assumed.
         loop_n += 1
@@ -956,6 +1149,10 @@ def _cam_loop_run(url, held):
                 % (loop_n / (now - loop_t0), cam_n / (now - loop_t0),
                    "%.0fms" % (iv * 1000) if iv else "?",
                    int(100.0 * grace_n / max(1, loop_n)), bus.dropped, bus.reopens))
+            # THE DERIVED GATES, beside the rate they were derived from. The whole class of
+            # bug this replaces was invisible precisely because nothing ever printed the
+            # gate next to the frame interval that decides what it means.
+            log("  gates: %s" % _gates_str(g))
             loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
         elif _run["state"] != "running":
             loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
@@ -1078,12 +1275,10 @@ def _cam_loop_run(url, held):
             # DOWN the frame, soil artefacts do not. Dropouts thin this history instead
             # of resetting a counter, which is what kept the old rule from ever firing.
             far_enough = traversed >= _TRAVERSE_MIN_M
-            if cross["found"]:
-                cross_hist.append((now, cross["tube_y"]))
-            cross_hist = [s for s in cross_hist if now - s[0] <= _TRAVERSE_TRACK_S]
-            grew = (cross_hist[-1][1] - cross_hist[0][1]) if len(cross_hist) >= 2 else 0.0
-            approaching = (len(cross_hist) >= _TRAVERSE_MIN_SIGHTS
-                           and grew >= _TRAVERSE_APPROACH_PX)
+            cross_hist, tr = _traverse_track(cross_hist, traversed, cross)
+            approaching = tr["approaching"]
+            sights, frac, grew = tr["sights"], tr["frac"], tr["grew"]
+            span_m, need_px = tr["span_m"], tr["need_px"]
             arrived = cross["found"] and cross["nearness"] >= _TRAVERSE_NEAR
 
             # SAY WHAT WE SEE. A field run drove over two real laterals and reported
@@ -1093,10 +1288,12 @@ def _cam_loop_run(url, held):
             if now - last_cross_log >= 1.0:
                 last_cross_log = now
                 log("  traverse %.2fm | found=%s y=%s near=%.2f w=%s s=%.1f %s | "
-                    "sights=%d grew=%+.0fpx%s"
+                    "sights %d/%d (%.0f%%, need %.0f%%) | grew %+.0fpx over %.2fm "
+                    "(need %.0fpx)%s"
                     % (traversed, cross["found"], cross["tube_y"], cross["nearness"],
                        cross["width"], cross["strength"], cross["polarity"] or "-",
-                       len(cross_hist), grew,
+                       len(sights), len(cross_hist), 100 * frac,
+                       100 * _TRAVERSE_MIN_SIGHT_FRAC, grew, span_m, need_px,
                        "" if far_enough else "  (still inside min-traverse)"))
 
             if far_enough and approaching and arrived:
@@ -1171,7 +1368,31 @@ def _cam_loop_run(url, held):
                 # forward the emitter leaves the frame entirely, so there is nothing left to
                 # close the loop on. It is only viable because the creep speed is measured
                 # (0.170 m/s at PWM 55) and the distance is short.
-                gap = _emitter_ground_m(emit, h)
+                # RE-CONFIRM ON A FRESH FRAME IF THE BOX IS STALE. The creep distance comes
+                # from the detection's ROW, so acting on a cached box places the seed wherever
+                # the emitter was up to _EMIT_TTL_S ago — 5cm at 0.170 m/s. The robot is
+                # stopped now, so this inference costs nothing it needs, and it FALLS BACK to
+                # the cached box if the fresh look finds nothing: strictly better placement,
+                # never a skipped emitter.
+                emit_for_creep = emit
+                stale_m = (now - _emit_cache["t"]) * _DRIP_SPEED_MPS
+                if stale_m > g["emit_stale_m"]:
+                    ok_f, fresh = _fresh_frame(bus, budget_s=0.6)
+                    if ok_f:
+                        moist2 = _moisture_min()
+                        e2 = (detect_emitter_ml(fresh, moisture=moist2)
+                              if ml_available() else detect_emitter(fresh, moisture=moist2))
+                        if e2 and e2.get("detected") and e2.get("position"):
+                            log("  emitter %d — box was %.0fmm stale, re-confirmed on a "
+                                "fresh frame (y %s -> %s)"
+                                % (_run["planted"] + 1, stale_m * 1000,
+                                   (emit.get("position") or (0, 0))[1], e2["position"][1]))
+                            emit_for_creep = e2
+                        else:
+                            log("  emitter %d — box was %.0fmm stale and the fresh frame "
+                                "found nothing; creeping on the cached box"
+                                % (_run["planted"] + 1, stale_m * 1000))
+                gap = _emitter_ground_m(emit_for_creep, h)
                 if gap and gap > 0.02:
                     log("  emitter %d — creeping %.2fm to bring it under the punch"
                         % (_run["planted"] + 1, gap))
@@ -1430,13 +1651,25 @@ def on_drip_config(client, data):
     _emit_run()
 
 # ── Dataset capture (drive the drip line, collect the emitter training set) ──
+# The UI thumbnail is throttled INDEPENDENTLY of the save rate. Dataset capture can now run
+# at the full frame rate (interval 0), and pushing a base64 thumbnail 30 times a second would
+# flood the operator socket and stall the control loop inside send_message — the saving is the
+# point, the preview is only reassurance that frames are arriving.
+_CAP_THUMB_MAX_FPS = 2.0
+_cap_thumb_last = [0.0]
+
+
 def _save_capture(frame):
-    """Save one RAW frame to disk + push a thumbnail to the UI for verification."""
+    """Save one RAW frame to disk; push a thumbnail to the UI at most _CAP_THUMB_MAX_FPS."""
     try:
         os.makedirs(_CAP_DIR, exist_ok=True)
         name = "cap_%s.jpg" % datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         cv2.imwrite(os.path.join(_CAP_DIR, name), frame)     # full-res, unannotated
         _capture["count"] += 1
+        now = time.time()
+        if now - _cap_thumb_last[0] < 1.0 / _CAP_THUMB_MAX_FPS:
+            return
+        _cap_thumb_last[0] = now
         th = cv2.resize(frame, (160, 120))
         ok, buf = cv2.imencode(".jpg", th, [cv2.IMWRITE_JPEG_QUALITY, 55])
         ui.send_message("capture_saved", {
@@ -1649,7 +1882,18 @@ def _emit_capture_status():
     })
 
 def on_capture_start(client, data):
-    _capture["interval"] = max(0.3, float(data.get("interval", 2.0)))
+    # FLOOR LOWERED FROM 0.3s TO 0. `interval=0` means SAVE EVERY FRAME, which two jobs need
+    # and neither could get before:
+    #   * the emitter training set — at 2s the robot moves 34cm between saves and steps clean
+    #     over most emitters; at frame rate each one is caught 4-6 times at different
+    #     distances and scales, which is exactly the variety FOMO needs
+    #   * temporal filtering (accepting a weaker per-frame detector and voting across frames)
+    #     cannot be validated at all without CONSECUTIVE frames. Every frame set we owned was
+    #     2s apart, so there was nothing to test it against.
+    # ~18KB a frame at 30fps is 32MB/minute against 15GB free, so a few one-minute passes are
+    # nothing. Subsample before uploading to Edge Impulse — near-duplicate frames leak between
+    # the train and test split and make the accuracy figure meaningless.
+    _capture["interval"] = max(0.0, float(data.get("interval", 2.0)))
     _capture["last"] = 0.0            # capture the next frame immediately
     _capture["on"] = True
     os.makedirs(_CAP_DIR, exist_ok=True)
