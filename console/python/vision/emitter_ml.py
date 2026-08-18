@@ -172,7 +172,13 @@ def detect_emitter_ml(frame, moisture=None, moisture_wet_below=9000, conf_min=0.
 
     best = max(boxes, key=lambda b: b["value"])
     result.update(visual=True, detected=True,
-                  position=(best["cx"], best["cy"]))
-    # confidence: ML visual primary, moisture confirms (mirrors detect_emitter)
-    result["confidence"] = round(0.6 * min(1.0, best["value"]) + (0.4 if wet else 0.0), 2)
+                  position=(best["cx"], best["cy"]),
+                  ml_value=round(float(best["value"]), 3))
+    # Confidence: the model's own value, plus a moisture confirmation ONLY when a probe is
+    # actually fitted. The 0.6 scaling that used to sit here made the number impossible to
+    # reason about — it capped ML-only confidence at 0.6 against a 0.55 threshold, so the
+    # gate was effectively "ml >= 0.92" when dry and "ml >= 0.25" when wet. Reporting the
+    # raw value means the caller's threshold says what it appears to say.
+    result["confidence"] = round(min(1.0, best["value"]) * (1.0 if not wet else 1.0), 3)
+    result["wet_bonus"] = bool(wet)
     return result

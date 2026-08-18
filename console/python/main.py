@@ -7,6 +7,7 @@ import struct
 import subprocess
 import threading
 import time
+import traceback
 import urllib.request
 from datetime import datetime, timezone
 
@@ -31,7 +32,7 @@ try:
             _sys.path.insert(0, _p)
     import cv2  # noqa: F401
     from vision.vision import detect_tube, detect_emitter, detect_crossing, draw_overlay
-    from vision.camera import FrameSource
+    from vision.camera import FrameBus
     # Optional on-device ML emitter model (Edge Impulse via the object_detection
     # brick). Self-guards; falls back to classical detect_emitter if no model.
     from vision.emitter_ml import detect_emitter_ml, ml_available
@@ -126,7 +127,12 @@ CAL = {
     "pwm": 180, "speed": 0.628, "startup": 0.099,
     "ltrim": 0.83, "rtrim": 1.00,
     "turn_pwm": 120, "tdps": 45.2, "tstartup": -0.80, "tramp": 0.0,
-    "creep": None,      # m/s at _BASE_PWM (tube-following). None -> see _DRIP_SPEED_MPS
+    # MEASURED 2026-08-18: `fwd 55 10 0.83` covered 1.70m in 10s.
+    # Stored WITH the duty it was measured at, because this project has twice been burnt by
+    # a calibration silently outliving the conditions it was taken under. If _BASE_PWM is
+    # changed and this is not re-measured, the mismatch is logged at startup rather than
+    # quietly corrupting every distance in the run.
+    "creep": 0.170, "creep_pwm": 55,
 }
 # Synced 2026-08-16 to the numbers actually validated on soil with field_test.py —
 # this block had drifted and the Seed tab was running stale calibration:
@@ -422,6 +428,15 @@ def _traverse_max():
     operator has already told us how far apart the rows are, so allow three of them.
     """
     return max(1.5, 3.0 * float(_plot.get("row_gap") or 0.7))
+# Emitter-model rate limit. See the camera loop for why this is not once per frame.
+# How old a frame may be and still be acted on. At 0.22 m/s the robot covers ~4cm in
+# 200ms; beyond that the view no longer describes where it is. Before the frame bus there
+# was no timestamp at all, so a 2s-old buffered frame was indistinguishable from a live one
+# and got steered on — the silent half of the stale-frame problem.
+_FRAME_MAX_AGE_S = 0.25   # unused: superseded by bus.stale_after(), which MEASURES the
+                          # camera's real frame interval instead of assuming one
+_EMIT_TTL_S = 0.30
+_emit_cache = {"t": 0.0, "res": None}
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
 _WATCH_TTL   = 2.0                 # keep pushing this long after the last get_vision poll
@@ -434,7 +449,28 @@ _CAP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "captur
 _capture = {"on": False, "interval": 2.0, "count": 0, "last": 0.0}
 
 # drip-follow tunables (mirror vision/tube_follow.py)
-_BASE_PWM, _STEER_GAIN, _EMIT_CONF, _EMIT_COOLDOWN = 77, 6, 0.55, 3.0
+# CREEP SPEED IS SET BY THE CAMERA, NOT BY THE MOTORS.
+# The camera delivers ~1.4 fps (measured 2026-08-18 with curl straight to it, robot app
+# stopped: 11 frames in 8s), so a new measurement arrives every ~710ms. At PWM 77 that is
+# 16cm of ground per control update, against a lookahead of ~62cm — a quarter of the
+# lookahead consumed blind between corrections, which no gain can stabilise. It also lets
+# the robot step clean over the band where an emitter counts as "in reach".
+#
+# PWM 55 roughly halves that. UNMEASURED: the speed at this duty has not been checked, and
+# the two numbers below depend on it —
+#   1. _DRIP_SPEED_MPS (distance tracking) was observed at PWM 77 and is now WRONG
+#   2. low duty risks stiction; if the robot stalls or crawls unevenly on soil, raise it
+# Measure both with:  field_test.py fwd 55 10 0.83   -> metres/10 = m/s
+_BASE_PWM = 55
+_CAL_PWM  = 77            # the duty _DRIP_SPEED_MPS was observed at
+# Threshold on the model's RAW value now (see emitter_ml: the old 0.6 scaling plus a bogus
+# moisture bonus made 0.55 mean "ml >= 0.25"). The three known false positives on plain tube
+# scored 0.57 / 0.77 / 0.87, so anything at or below 0.87 would still accept them. 0.90 is a
+# starting point chosen to reject the KNOWN false positives — it is not validated against
+# real emitters, because we have no frame of a confirmed emitter to measure. If the next run
+# detects nothing at all, the model cannot separate emitter from tube and needs retraining
+# with plain-tube negatives.
+_EMIT_CONF, _EMIT_COOLDOWN = 0.90, 3.0
 # WHERE in frame the emitter must be before we stop for it. The camera looks down AND
 # ahead, so an emitter first appears near the TOP of the frame — a metre or more away.
 # Confidence alone as the trigger meant the robot stopped the instant each emitter
@@ -444,8 +480,42 @@ _BASE_PWM, _STEER_GAIN, _EMIT_CONF, _EMIT_COOLDOWN = 77, 6, 0.55, 3.0
 _EMIT_MIN_Y_FRAC = 0.55
 
 
+# WHERE THE PUNCH IS, RELATIVE TO WHAT THE CAMERA CAN SEE. Measured 2026-08-18:
+#     punch tip -> front wheel centre    16 cm   (seeder is centre-mounted; tip sits 3cm
+#                                                 behind the pivot axis)
+#     front wheel -> bottom of frame     23 cm
+#     bottom of frame -> top of frame    22 cm
+# So the visible strip is 39-61 cm AHEAD OF THE PUNCH. An emitter under the tip is invisible:
+# it left the frame 39 cm ago. Stopping the instant one is "in reach" therefore plants ~30 cm
+# short of every emitter — which is what the emitter logic did before this.
+_PUNCH_TO_FRAME_NEAR_M = 0.39
+_PUNCH_TO_FRAME_FAR_M  = 0.61
+
+
+def _emitter_ground_m(emit, h):
+    """Metres from the PUNCH TIP to a detected emitter, or None.
+
+    Maps the detection's row in the image to a ground distance by linear interpolation
+    between the two measured frame edges. Ignores perspective, which over a 22cm strip from
+    an 18cm-high camera costs about 3cm at mid-frame (~13% of the span) — acceptable for
+    dropping a seed beside an emitter, and it is why the trigger prefers detections near the
+    BOTTOM of the frame, where both the interpolation error and the creep distance are least.
+    To do better, calibrate y-to-distance with an object at two known distances.
+    """
+    pos = emit.get("position")
+    if not pos or not h:
+        return None
+    frac = max(0.0, min(1.0, pos[1] / float(h)))     # 0 = top of frame, 1 = bottom
+    return _PUNCH_TO_FRAME_FAR_M - frac * (_PUNCH_TO_FRAME_FAR_M - _PUNCH_TO_FRAME_NEAR_M)
+
+
 def _emitter_in_reach(emit, h):
-    """True when the detected emitter is near enough to be under the seeder."""
+    """True when the emitter is low enough in frame to act on.
+
+    No longer means "under the seeder" — it cannot, since the seeder is 39cm behind the
+    nearest visible ground. It means "near enough that the creep is short and the distance
+    estimate is good", after which _creep() brings it under the tip.
+    """
     pos = emit.get("position")
     if not pos or not h:
         return False
@@ -465,13 +535,40 @@ def _emitter_in_reach(emit, h):
 # the tube's TILT as a damping term. detect_tube has always returned `angle_deg` and
 # nothing ever read it — steering on position alone is why it hunts. Tilt says whether
 # we are converging or diverging, which is the derivative term this loop lacked.
-_STEER_MIN_DIFF = 11    # PWM differential floor once past the deadband (beats stiction)
+# GAIN AND FLOOR TOGETHER DECIDE WHETHER THIS IS PROPORTIONAL AT ALL.
+# At gain 6 the old command was 6 x err, and real frames give |err| under about 1.8 — so
+# the result was below the 11 PWM floor essentially always, and every correction came out
+# at exactly +/-11 whatever the error. That is a BANG-BANG controller, which is its own
+# source of weaving regardless of how good the measurement is.
+# Gain 14 with a floor of 9 puts the proportional region where the errors actually live:
+# below err 0.65 the floor still guarantees the robot moves against stiction, and above it
+# the command tracks the error. UNVERIFIED IN THE FIELD — these are chosen so a proportional
+# band exists, not calibrated.
+# Gain and floor are expressed AT _CAL_PWM and scaled to the duty actually in use — a
+# differential of 20 PWM on a base of 77 is a gentle correction; the same 20 on a base of
+# 55 is a much harder turn, and the same steering command would suddenly oversteer.
+_STEER_SCALE    = _BASE_PWM / float(_CAL_PWM)
+_STEER_GAIN     = 14 * _STEER_SCALE
+_STEER_MIN_DIFF = max(6, int(round(9 * _STEER_SCALE)))
 _STEER_DEADBAND = 0.25  # ignore correction noise below this — do not chase pixels
-_STEER_ANG_GAIN = 0.0   # DISABLED 2026-08-17: tilt damping made steering WORSE in
-                        # the field. The sign convention of detect_tube's angle_deg
-                        # was never verified against the robot, and a wrong-signed
-                        # derivative term amplifies the hunting it was meant to damp.
-                        # Do not re-enable without checking the sign on hardware.
+# How much of the error comes from the LOOKAHEAD point rather than the tube at the wheels.
+# 0.0 waits until the tube reaches the wheels before correcting; 1.0 ignores lateral offset
+# entirely and tracks parallel to the row without ever closing on it.
+#
+# Retuned 2026-08-18 with the USB camera. Two things changed and they pull the same way:
+#   * The near point is genuinely NEAR now — 41cm from the pivot axis, so cross-track error
+#     is worth acting on rather than being a stale figure.
+#   * The near-to-far baseline shrank from 34cm to 22cm, so `far - near` (the heading signal)
+#     is measured over less ground and is correspondingly noisier. Weighting it heavily
+#     amplifies that noise.
+#   * And at 30fps, frame rate substitutes for lookahead: a correction that is slightly late
+#     is re-decided 30 times a second rather than once per 12cm of travel.
+# 0.5 splits it evenly. UNVALIDATED IN THE FIELD — start here, and if it tracks parallel but
+# offset, lower it; if it hunts, raise it.
+_STEER_W_FAR = 0.5
+# (The tilt-as-derivative term is gone. far/near carry the same, verified sign convention,
+#  and far minus near is the tilt — so the same information arrives without the sign risk
+#  that made the earlier angle_deg term make steering worse.)
 
 
 # ── Temporal gate on the tube reading ────────────────────────────────────────
@@ -485,6 +582,21 @@ _STEER_ANG_GAIN = 0.0   # DISABLED 2026-08-17: tilt damping made steering WORSE 
 _TRACK_MAX_JUMP_PX = 70     # per frame at ~10fps; a real tube drifts, it does not teleport
 _TRACK_RELOCK_N    = 6      # consecutive rejects before believing the new position
 _TRACK_STALE_S     = 1.5    # no accepted reading for this long -> accept the next one
+# HOW LONG A DETECTION GAP TO DRIVE THROUGH before stopping.
+# The detector achieves 69% on real captures (measured over 80 frames, 2026-08-18) — the 31%
+# it misses are frames where the robot's own shadow corrupts one of the four bands, and five
+# different discriminators failed to separate those from genuine non-tube frames. But at 30fps
+# that still leaves ~20 good readings a second, and the tube does not move in 33ms.
+#
+# Stopping on the FIRST missed frame is what made the robot halt after ~10cm: it was not
+# losing the tube, it was hitting one bad frame in three. So carry the last good reading for
+# a short grace period. At 0.170 m/s, 0.4s is 7cm driven on a slightly stale correction —
+# far less bad than lurching to a halt three times a second.
+#
+# This is a tolerance, not a blindfold: past the grace period the robot still stops, which is
+# what protects it when the tube genuinely leaves the view.
+_TUBE_GRACE_S = 0.4
+_tube_hold = {"t": 0.0, "tube": None}
 # PLAUSIBLE FOR THIS CAMERA. The detector reports what the profile says; how wide the
 # tube can look from this camera at this height is the robot's knowledge, not the
 # detector's. Measured across every real following frame: 38, 40, 46, 46, 62, 68, 70,
@@ -505,13 +617,34 @@ def _track_reset():
     _track.update(x=None, rejects=0, last_ok=0.0)
 
 
+def _tube_with_grace(tube, now):
+    """Carry the last good reading through a brief detection gap.
+
+    Returns (tube, holding) — `holding` is True when this is a remembered reading rather
+    than a fresh one, so the caller can log it and decide how much to trust it.
+    """
+    if tube["found"]:
+        _tube_hold["t"], _tube_hold["tube"] = now, tube
+        return tube, False
+    held = _tube_hold["tube"]
+    if held is not None and (now - _tube_hold["t"]) <= _TUBE_GRACE_S:
+        out = dict(held)
+        out["held_for"] = round(now - _tube_hold["t"], 2)
+        return out, True
+    return tube, False
+
+
+def _tube_grace_reset():
+    _tube_hold["t"], _tube_hold["tube"] = 0.0, None
+
+
 def _track_tube(tube, w, now):
     """Accept, reject or re-acquire this frame's tube reading."""
     if not _tube_plausible(tube):
         _track["rejects"] = 0            # nothing to disagree with; do not count it
         out = dict(tube)
         if tube["found"]:                # found, but not tube-shaped: say so
-            out.update(found=False, correction=0.0, implausible=True)
+            out.update(found=False, correction=0.0, far_correction=0.0, implausible=True)
         return out
     x = tube["tube_x"]
     prev = _track["x"]
@@ -522,25 +655,46 @@ def _track_tube(tube, w, now):
         return tube
     _track["rejects"] += 1
     out = dict(tube)
-    out.update(found=False, correction=0.0, rejected_x=x,
+    out.update(found=False, correction=0.0, far_correction=0.0, rejected_x=x,
                reject_run=_track["rejects"])
     return out
 
 
 def _steer(tube):
-    """Differential PWM for the current tube reading. Position + tilt damping."""
-    c = tube.get("correction") or 0.0
-    if abs(c) < _STEER_DEADBAND:
-        c = 0.0
-    d = _STEER_GAIN * c
+    """Differential PWM from a LOOKAHEAD-weighted error.
 
-    # Tilt: detect_tube now returns SIGNED tilt from vertical (0 = aligned), so no
-    # conversion. It says which way the robot is heading off BEFORE the offset has
-    # grown — the early warning position feedback alone cannot give.
-    a = tube.get("angle_deg")
-    if a is not None:
-        d += _STEER_ANG_GAIN * max(-45.0, min(45.0, a))
+    The robot used to steer on the tube's position averaged over the whole frame, and it
+    would not correct until the tube had reached the wheels — then it corrected hard,
+    overshot, and zig-zagged. That is a structural fault, not a gain that needed tuning:
+    with the robot still over the tube at the wheels but pointing off, the displacement is
+    ALL at the top of the frame, so the average halves it and the half it keeps describes
+    where the robot IS rather than where it is GOING.
 
+    So the error is a blend of two points the detector now reports separately: the tube at
+    the robot (cross-track) and the tube at the top of the frame (lookahead). Weighted
+    toward the lookahead, the robot starts correcting while the error is still small, which
+    is what removes the oscillation; the cross-track term is what stops it settling
+    parallel to the row but offset from it. This is the standard geometry for row guidance
+    — Pure Pursuit / Stanley — and lookahead is the parameter that matters.
+
+    Both terms use `correction` units and the SAME sign convention ("+ = tube is right ->
+    steer right"), deliberately: an earlier version fed the tube's tilt angle in as a
+    derivative term and made steering worse, because the angle's sign was never verified
+    against the robot. far minus near IS that tilt, expressed in units whose sign is
+    already pinned by the detector's contract.
+
+    NOTE the lookahead is only as good as the camera geometry, which is unmeasured — the
+    weights below are a starting point, not a calibration. Too little lookahead hunts
+    (where we started); too much cuts corners and ignores real offset.
+    """
+    near = tube.get("correction") or 0.0
+    far = tube.get("far_correction")
+    if far is None:                       # detector without a lookahead point
+        far = near
+    err = _STEER_W_FAR * far + (1.0 - _STEER_W_FAR) * near
+    if abs(err) < _STEER_DEADBAND:
+        err = 0.0
+    d = _STEER_GAIN * err
     if d and abs(d) < _STEER_MIN_DIFF:                 # floor, so small errors DO move it
         d = _STEER_MIN_DIFF if d > 0 else -_STEER_MIN_DIFF
     return int(max(-60, min(60, d)))                   # cap: never reverse a wheel
@@ -559,9 +713,29 @@ def _steer(tube):
 # better number. It is still an observation, not a measurement. MEASURE IT:
 #     ssh unoq 'python3 ~/motor-control/scripts/field_test.py fwd 77 10 0.83'
 #     creep = (metres the robot actually moved) / 10   -> put it in CAL["creep"]
-_DRIP_SPEED_MPS = CAL.get("creep") or 0.225
+_DRIP_SPEED_MPS = CAL.get("creep") or (0.225 * _BASE_PWM / float(_CAL_PWM))
+if CAL.get("creep") and CAL.get("creep_pwm") != _BASE_PWM:
+    print("WARNING: creep speed %.3f m/s was measured at PWM %s but _BASE_PWM is %d — "
+          "re-run `field_test.py fwd %d 10 0.83` and update CAL[\"creep\"], or every "
+          "distance this run reports will be wrong."
+          % (CAL["creep"], CAL.get("creep_pwm"), _BASE_PWM, _BASE_PWM), flush=True)
+
+# THE MOISTURE PROBE IS NOT FITTED, so it must not vote on emitter detection.
+# uno-q-wiring.md: "The seeder uses D10/A3/D11/D13; the probe uses A4/A5/D2" — the two are
+# mutually exclusive attachments, and A4/A5 now carry the gyro. So during a seeding run A0/A1
+# are FLOATING, and they read 1855/2099 out of 16383, which is below the 9000 "wet" threshold.
+# detect_emitter_ml adds +0.4 confidence when wet, so every frame got that bonus for free:
+#   conf = 0.6 x ml_value + 0.4
+# which means an ml_value of only 0.25 clears the 0.55 gate. Reading back from the three
+# false positives logged on 2026-08-18 (conf 0.92/0.74/0.86 on frames showing PLAIN TUBE):
+#   ml was 0.87 / 0.57 / 0.77  ->  without the bonus: 0.52 / 0.34 / 0.46, all REJECTED.
+# So a disconnected sensor was manufacturing the confidence that let plain tube pass.
+MOISTURE_PRESENT = False
+
 
 def _moisture_min():
+    if not MOISTURE_PRESENT:
+        return None                 # None -> detect_emitter_ml leaves `wet` False
     try:
         m = json.loads(_decode(Bridge.call("getMoisture")))
         return min(m.get("a0", 16383), m.get("a1", 16383))
@@ -595,6 +769,14 @@ def _resolve_mdns(name):
         log("resolve %s: helper returned no ip" % name)
     except Exception as e:                    # noqa: BLE001
         log("resolve %s failed: %s" % (name, e))
+    # FALL BACK TO THE LAST KNOWN IP, even expired. The helper timed out once on
+    # 2026-08-18 and the loop got the bare name back, which cannot resolve inside this
+    # container — so the camera failed to open at all and stayed down until someone
+    # pressed Connect. A stale IP is nearly always right (the cam holds its DHCP lease)
+    # and is strictly better than a name we know will fail.
+    if hit:
+        log("  using last known %s -> %s (resolve failed)" % (name, hit[1]))
+        return hit[1]
     return name
 
 
@@ -607,10 +789,16 @@ def _host(hostport):
 
 
 def _stream_url(base):
-    """Accept 'ip', 'host.local', 'http://…', or a full URL -> MJPEG stream URL."""
-    b = base.strip()
+    """Accept 'ip', 'host.local', 'http://…', a full URL, or a USB camera -> source spec.
+
+    A USB camera is passed through UNCHANGED for FrameBus to route. Without this, '2' went
+    through the mDNS/host path and came out as 'http://2:81/stream'.
+    """
+    b = str(base).strip()
     if not b:
         return ""
+    if b.lower() in ("usb", "auto", "webcam") or b.startswith("/dev/video") or b.isdigit():
+        return b                              # USB camera: FrameBus._open handles it
     if b.startswith("http"):
         rest = b.split("://", 1)[1]
         hostport, slash, tail = rest.partition("/")
@@ -622,6 +810,48 @@ def _stream_url(base):
     return "http://%s/stream" % hostport
 
 def _cam_loop(url):
+    """Guarded entry point. WHATEVER happens inside, release the camera and stop the wheels.
+
+    This wrapper exists because of a specific, expensive failure on 2026-08-18: an
+    UnboundLocalError on the first frame killed the loop thread, and because `bus.stop()`
+    was the last STATEMENT of the loop rather than a guaranteed one, the FrameBus reader
+    thread survived and kept streaming the V4L2 device. A V4L2 camera streams to one
+    consumer, so every subsequent Connect opened the same device, got no frames, and leaked
+    another orphan reader — the camera stayed dead until the container was restarted, and
+    the log only ever showed "camera open failed".
+
+    Two guarantees, and they are worth more than the typo that motivated them:
+      * THE CAMERA IS ALWAYS RELEASED, so a crash costs one loop, not the device.
+      * THE MOTORS ARE ALWAYS STOPPED. The old code left the last setMotors latched when
+        the loop exited for ANY reason — a crash, or the operator simply changing camera
+        mid-run. Same fail-safe as "no frame = no eyes -> stop", one level further out.
+
+    `held` is a cell rather than a return value because the bus must be reachable from the
+    finally even when the body raised before it could return anything.
+    """
+    held = {}
+    try:
+        _cam_loop_run(url, held)
+    except Exception:                                          # noqa: BLE001
+        # PRINT THE TRACEBACK. A bare thread exception goes to stderr and is easy to miss
+        # in the container log; routing it through log() puts it in the operator's log too,
+        # beside the frames and decisions that led up to it.
+        log("camera loop CRASHED — releasing the camera and stopping the motors:\n%s"
+            % traceback.format_exc())
+    finally:
+        bus = held.get("bus")
+        if bus is not None:
+            try:
+                bus.stop()
+            except Exception:                                  # noqa: BLE001
+                log("camera loop exit: bus.stop() raised:\n%s" % traceback.format_exc())
+        try:
+            _drive_stop("cam-loop-exit")
+        except Exception:                                      # noqa: BLE001
+            log("camera loop exit: could not stop the motors:\n%s" % traceback.format_exc())
+
+
+def _cam_loop_run(url, held):
     travelled = 0.0             # estimated distance along the lateral this run
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
     armed = True                # detection-edge debounce (see the drip branch)
@@ -634,23 +864,39 @@ def _cam_loop(url):
     lateral = 0
     traversed = 0.0
     cross_hist = []             # recent crossing sightings: (time, tube_y)
+    loop_t0, loop_n = time.time(), 0     # camera-loop rate, logged during a run
+    grace_n = 0                          # frames driven on a HELD reading (shadow gaps)
+    bus_frames0 = 0                      # camera frame count at the last rate log
     last_cross_log = 0.0
     prev_run_state = None       # to detect a FRESH run and reset per-run counters
     last_push = 0.0
     push_interval = 1.0 / _BROWSER_FPS
+    # A THREAD OWNS THE CAMERA NOW. This loop blocks for seconds at a time — 2s of plant
+    # dwell per emitter, ~1.5s per pivot, ~1.7s creeping onto a lateral — and while it did,
+    # nobody read the socket. The camera then could not finish a send, abandoned the frame
+    # ("Stream ends prematurely at 5675") and the stream got reopened; the frame after a
+    # reopen decodes into a fresh zero-filled buffer, which is what the green patches are.
+    # The bus also timestamps frames, so this loop can tell a live view from a 2s-old one —
+    # which it previously had no way to do at all.
     try:
-        src = FrameSource(_stream_url(url))
+        bus = FrameBus(_stream_url(url), reopen_after_s=_CAM_STALE_S, on_log=log)
+        held["bus"] = bus       # reachable from the finally BEFORE start() can raise:
+        bus.start()             # __init__ opens nothing, start() is what claims the device
     except Exception as e:
         print("camera open failed: %s" % e, flush=True)
         return
-    print("camera loop (sole consumer): %s  [emitter: %s]"
+    print("camera loop (frame bus): %s  [emitter: %s]"
           % (_stream_url(url), "ML/Edge-Impulse" if ml_available() else "classical CV"),
           flush=True)
     fail_since = None
-    reopens = 0
+    last_frame_t = 0.0
     while _cam["url"] == url and _VISION_OK:
-        ok, frame = src.read()
-        if not ok:
+        t_frame, frame = bus.latest()
+        fresh = frame is not None and bus.age() <= bus.stale_after()
+        if frame is not None and t_frame == last_frame_t and fresh:
+            time.sleep(0.005)         # nothing new yet; do not re-process the same frame
+            continue
+        if not fresh:
             # NO FRAME = NO EYES. Stop the motors before anything else.
             # This branch used to `continue` straight past the drive logic, which
             # left the LAST setMotors command running: on 2026-08-16 a stream that
@@ -667,41 +913,74 @@ def _cam_loop(url):
             # to start a replacement precisely because a thread was alive. Result:
             # Connect did nothing, permanently (2026-08-15, seven clicks, no effect).
             # So: reopen the stream, and if that keeps failing, DIE so Connect works.
+            # The bus reopens the stream by itself; this is the escalation when reopening
+            # is not working, and it has to stay because a thread that is ALIVE but useless
+            # made Connect a no-op (2026-08-15, seven clicks, nothing).
             fail_since = fail_since or time.time()
-            if time.time() - fail_since > _CAM_STALE_S:
-                reopens += 1
-                if reopens > _CAM_REOPEN_TRIES:
-                    log("camera stream dead and %d reopens failed — dropping the loop "
-                        "so Connect can start a fresh one" % _CAM_REOPEN_TRIES)
+            if time.time() - fail_since > _CAM_STALE_S * 2:
+                if bus.open_failures > _CAM_REOPEN_TRIES or not bus.alive():
+                    log("camera dead (%d reopens, %d open failures) — dropping the loop "
+                        "so Connect can start a fresh one"
+                        % (bus.reopens, bus.open_failures))
                     _cam["url"] = ""          # UI shows disconnected; next Connect is clean
                     break
-                log("camera stream stale for %.0fs — reopening (attempt %d/%d)"
-                    % (_CAM_STALE_S, reopens, _CAM_REOPEN_TRIES))
-                try:
-                    src.release()
-                except Exception:             # noqa: BLE001
-                    pass
-                try:
-                    src = FrameSource(_stream_url(url))
-                    log("camera stream reopened")
-                except Exception as e:        # noqa: BLE001
-                    log("camera reopen failed: %s" % e)
-                fail_since = time.time()      # restart the clock either way
+                fail_since = time.time()
             time.sleep(0.1)
             continue
         fail_since = None
-        reopens = 0
-        _cam["last_frame"] = time.time()
-        h, w = frame.shape[:2]
-        tube = _track_tube(detect_tube(frame), w, now=time.time())
-        moist = _moisture_min()
-        # ML emitter model first (the Physical-AI showcase); fall back to
-        # classical detect_emitter if no model is deployed / inference fails.
-        emit = detect_emitter_ml(frame, moisture=moist) if ml_available() else None
-        if emit is None or not emit.get("ml_ready"):
-            emit = detect_emitter(frame, moisture=moist)
-        _cam.update(w=w, h=h, tube=tube, emitter=emit)
+        last_frame_t = t_frame
+        _cam["last_frame"] = t_frame
         now = time.time()
+        h, w = frame.shape[:2]
+        # DETECT FIRST, THEN COUNT WHAT THE DETECTION DID. `holding` comes out of
+        # _tube_with_grace and is read by the rate log immediately below; with the log
+        # ordered first it was read before it was ever assigned, so the loop died with
+        # UnboundLocalError on its FIRST fresh frame and took the camera down with it
+        # (2026-08-18 — see the guard on _cam_loop for the other half of that failure).
+        tube = _track_tube(detect_tube(frame), w, now=now)
+        tube, holding = _tube_with_grace(tube, now)
+        # Loop rate, logged while a run is active. The whole point of decoupling the
+        # emitter model was to raise this, so it should be visible rather than assumed.
+        loop_n += 1
+        if holding:
+            grace_n += 1
+        if _run["state"] == "running" and now - loop_t0 >= 5.0:
+            # Report the CAMERA's rate beside the loop's. They answer different questions:
+            # if the camera is delivering 15fps and the loop runs at 1, the control loop is
+            # the bottleneck; if the camera itself is at 1fps, no amount of loop tuning
+            # helps and the problem is the stream. `dropped` is corrupt frames refused.
+            cam_n = bus.frames - bus_frames0
+            iv = bus.interval()
+            log("  loop %.1f fps | camera %.1f fps (frame every %s) | tube held %d%% of "
+                "frames (shadow gaps) | %d dropped, %d reopens"
+                % (loop_n / (now - loop_t0), cam_n / (now - loop_t0),
+                   "%.0fms" % (iv * 1000) if iv else "?",
+                   int(100.0 * grace_n / max(1, loop_n)), bus.dropped, bus.reopens))
+            loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
+        elif _run["state"] != "running":
+            loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
+
+        # THE EMITTER MODEL NO LONGER PACES THE STEERING LOOP.
+        # Inference costs 70-90ms, and it ran on every frame ahead of the steering, so the
+        # control loop ticked at ~10Hz. That is the other half of the oscillation problem:
+        # a line-following robot gets away with crude control because it re-decides a
+        # thousand times a second, and at 10Hz every correction is acting on a stale view.
+        # Tube detection is ~2-3ms, so running it every frame and the model periodically
+        # gives the steering several times the rate for free.
+        #
+        # Holding a detection for _EMIT_TTL_S is safe: at 0.22 m/s the robot moves ~5cm in
+        # that window, the plant trigger additionally requires the emitter to be low in
+        # frame, and re-arming is edge-triggered — so a stale box cannot manufacture a
+        # second plant at the same emitter.
+        if (now - _emit_cache["t"]) >= _EMIT_TTL_S or _emit_cache["res"] is None:
+            moist = _moisture_min()
+            emit = detect_emitter_ml(frame, moisture=moist) if ml_available() else None
+            if emit is None or not emit.get("ml_ready"):
+                emit = detect_emitter(frame, moisture=moist)
+            _emit_cache["t"], _emit_cache["res"] = now, emit
+        else:
+            emit = _emit_cache["res"]
+        _cam.update(w=w, h=h, tube=tube, emitter=emit)
 
         # Dataset capture: save the RAW frame at the chosen interval (for training
         # the emitter model). Independent of drip mode; toggled from the UI.
@@ -717,6 +996,8 @@ def _cam_loop(url):
             phase, lateral, travelled, traversed = "follow", 0, 0.0, 0.0
             cross_hist = []
             _track_reset()
+            _tube_grace_reset()
+            _emit_cache["t"], _emit_cache["res"] = 0.0, None
             last_plant_at, armed, driving_since = -1e9, True, None
         prev_run_state = _run["state"]
 
@@ -733,9 +1014,31 @@ def _cam_loop(url):
         elif tube["found"] != tube_seen:
             tube_seen = tube["found"]
             if tube_seen:
-                log("tube REGAINED (x=%s px, correction=%+.2f) — driving resumes"
-                    % (tube.get("tube_x"), tube.get("correction") or 0.0))
+                log("tube REGAINED (near=%s far=%s px, corr near %+.2f far %+.2f, "
+                    "tilt %s) — driving resumes"
+                    % (tube.get("x_near"), tube.get("x_far"),
+                       tube.get("correction") or 0.0,
+                       tube.get("far_correction") or 0.0, tube.get("angle_deg")))
             else:
+                # SAVE THE FRAME WE FAILED ON. Until now only SUCCESSES were kept — the
+                # emitN_latM frames are written when the robot stops to plant — so a run
+                # that lost the tube left no evidence of why, and the shadowed-tube report
+                # of 2026-08-17 could not be investigated at all. The failures are the
+                # frames worth having: every detector fix today came from looking at real
+                # pixels, and twice reasoning without them sent us the wrong way.
+                shot = _save_named(frame, "lost")
+                # The emitter branch is an `elif` after this one, so NO TUBE means the
+                # emitter test never runs at all — during the 2026-08-18 run that made
+                # emitter detection structurally unreachable, and the log gave no hint of
+                # it. Reporting what the model saw here separates "the model found nothing"
+                # from "we never asked".
+                log("  lost-frame saved [%s] — detector said found=%s w=%s s=%.1f, "
+                    "emitter conf %.2f (not evaluated: no tube)%s"
+                    % (shot, tube.get("found"), tube.get("width"),
+                       tube.get("strength") or 0.0, emit.get("confidence") or 0.0,
+                       ", reading REJECTED as implausible" if tube.get("implausible")
+                       else (", jump rejected (x=%s)" % tube.get("rejected_x"))
+                       if tube.get("rejected_x") is not None else ""))
                 log("tube LOST — motors stopped. Run is STILL ACTIVE and will drive "
                     "again by itself when the tube is back in view; capture keeps "
                     "running throughout. Press Stop to end the run.")
@@ -804,12 +1107,12 @@ def _cam_loop(url):
                     "%.1f sigma %s) — turning on [decision frame %s]"
                     % (traversed, cross["nearness"], cross["tube_y"], cross["width"],
                        cross["strength"], cross["polarity"], pre))
-                reached = _arrive_over_lateral(src)   # get the pivot axis ONTO the tube
+                reached = _arrive_over_lateral(bus)   # get the pivot axis ONTO the tube
                 log("  arrived over the lateral (nearness reached %.2f, then %.2fm "
                     "of camera lookahead) — pivoting %s"
                     % (reached, _ARRIVE_EXTRA_M, "right" if turn_right else "left"))
                 _track_reset()                        # new row: do not gate on the old x
-                _turn_onto_tube(src, turn_right, "lat%d" % (lateral + 2))
+                _turn_onto_tube(bus, turn_right, "lat%d" % (lateral + 2))
                 lateral += 1
                 phase = "follow"
                 travelled = 0.0
@@ -860,6 +1163,20 @@ def _cam_loop(url):
                 # the fact: was it a real emitter, and was the robot actually on top of
                 # it? A confidence number in a log line cannot answer either.
                 shot = _save_named(frame, "emit%d_lat%d" % (_run["planted"] + 1, lateral + 1))
+
+                # CREEP THE EMITTER UNDER THE PUNCH before planting. The seeder is 39cm
+                # behind the nearest ground the camera can see, so at the moment of
+                # detection the emitter is always ahead of the tip and planting here would
+                # drop the seed ~30-40cm short. Open-loop by necessity: once the robot moves
+                # forward the emitter leaves the frame entirely, so there is nothing left to
+                # close the loop on. It is only viable because the creep speed is measured
+                # (0.170 m/s at PWM 55) and the distance is short.
+                gap = _emitter_ground_m(emit, h)
+                if gap and gap > 0.02:
+                    log("  emitter %d — creeping %.2fm to bring it under the punch"
+                        % (_run["planted"] + 1, gap))
+                    _creep(gap)
+                    travelled += gap
                 # One stop, then plant at EVERY selected arm position: [0, 90] gives
                 # a 4-seed cross (0/180 then 90/270).
                 for a in _drip["angles"]:
@@ -877,8 +1194,10 @@ def _cam_loop(url):
                 if _drip_rotates():
                     Bridge.call("indexSpool", 0)      # leave the arm flat for driving
                 ey = (emit.get("position") or (0, 0))[1]
-                log("  emitter %d — STOPPED at %.2fm (conf %.2f, y=%d/%d) [frame %s]%s"
-                    % (_run["planted"] + 1, travelled, emit["confidence"], ey, h, shot,
+                ml_raw = emit.get("ml_value")
+                log("  emitter %d — STOPPED at %.2fm (conf %.2f%s, y=%d/%d) [frame %s]%s"
+                    % (_run["planted"] + 1, travelled, emit["confidence"],
+                       "" if ml_raw is None else ", ml %.2f" % ml_raw, ey, h, shot,
                        " (dry: holding %.1fs, seeder idle)" % _PLANT_SIM_S
                        if _run["dry"] else ""))
                 _run["planted"] += 1
@@ -938,7 +1257,8 @@ def _cam_loop(url):
             except Exception as e:                       # noqa: BLE001
                 print("cam push failed: %s" % e, flush=True)
         time.sleep(0.02)
-    src.release()
+    # NO bus.stop() HERE. It lives in _cam_loop's finally, so it also runs when this
+    # function raises or returns early — which is the whole point of the split.
 
 def on_set_camera(client, data):
     global _cam_thread
@@ -952,9 +1272,19 @@ def on_set_camera(client, data):
         return                       # genuinely streaming this url — no duplicate loop
     if alive and not streaming:
         log("camera loop alive but stale (no frame for %.0fs) — restarting it" % age)
-        _cam["url"] = ""             # drops the old loop out of its while condition
-        time.sleep(0.3)              # let it notice before we start the replacement
     _cam["url"] = url                # a changed url makes the old loop exit (while _cam["url"]==url)
+
+    # WAIT FOR THE OLD LOOP TO ACTUALLY DIE before starting another.
+    # This used to sleep 0.3s and hope. The loop can be blocked inside a socket read for
+    # seconds, so the replacement started while the old one still held the stream — and the
+    # ESP32-CAM serves ONE client, so the new connection timed out and took the working one
+    # down with it (2026-08-18: "camera open failed: timed out", then 4 failed reopens and
+    # the loop was dropped). Joining is bounded, so a wedged thread cannot block the UI.
+    if alive and _cam_thread is not None:
+        _cam_thread.join(timeout=6.0)
+        if _cam_thread.is_alive():
+            log("WARNING old camera loop did not exit in 6s — starting the new one anyway; "
+                "if the stream serves a single client expect this connect to fail")
     if url and _VISION_OK:
         _cam_thread = threading.Thread(target=_cam_loop, args=(url,), daemon=True)
         _cam_thread.start()
@@ -1128,26 +1458,16 @@ def _save_named(frame, tag):
         return ""
 
 
-def _fresh_frame(src, budget_s=1.2):
-    """Read past buffered frames and return the LIVE one.
+def _fresh_frame(bus, budget_s=1.5):
+    """A frame captured AFTER this call — never one buffered from before it.
 
-    A pivot blocks for a second or more while the MJPEG decoder keeps buffering, so
-    src.read() straight afterwards hands back the view from mid-spin — and an alignment
-    check on that frame is worse than no check at all. Buffered reads return instantly;
-    a read at the live edge has to wait for the camera. So: read until one waits.
-    (CAP_PROP_BUFFERSIZE would be the tidy fix. It kills this stream — see camera.py.)
+    Replaces a heuristic that read frames until one took longer than 40ms and called that
+    the live edge: it was guessing at the buffer depth, and it guessed wrong often enough
+    that two alignment frames came back byte-for-byte identical in scene. The bus stamps
+    each frame with its capture time, so "newer than now" is exact rather than inferred.
     """
-    ok, frame = src.read()
-    deadline = time.time() + budget_s
-    while ok and time.time() < deadline:
-        t0 = time.time()
-        ok2, f2 = src.read()
-        if not ok2:
-            break
-        frame = f2
-        if time.time() - t0 > 0.04:        # this read waited on the network -> live
-            break
-    return ok, frame
+    t, frame = bus.wait_fresh(after_t=time.time(), timeout=budget_s)
+    return (frame is not None), frame
 
 
 def _tilt_str(t):
@@ -1208,9 +1528,18 @@ def _nudge(turn_right, pulse):
 # lateral still crossing at y=221. So drive the band down to the bottom of the frame
 # first, then blind-creep the camera's own lookahead.
 _ARRIVE_NEAR    = 0.88
-_ARRIVE_EXTRA_M = 0.20   # camera bottom-edge -> pivot axis. ESTIMATE. To measure: park
-                         # so a tube sits on the bottom edge of the live view, then
-                         # measure tube to wheel axis on the ground.
+# RE-MEASURED 2026-08-18 for the USB camera, mounted 18cm high and tilted down:
+#     bottom of frame -> wheel contact      23 cm
+#     wheel contact   -> front axle        + 5 cm
+#     front axle      -> pivot axis        +13 cm   (half the 26cm wheelbase)
+#     bottom of frame -> PIVOT AXIS          41 cm
+# Visible ground runs 23cm to 45cm ahead of the wheels (a 22cm strip).
+#
+# The +5 and +13 are the ones people forget: a skid-steer rotates about the MIDDLE of its
+# wheelbase, not the wheel contact patch, so stopping "at the wheels" parks the lateral half
+# a wheelbase behind the pivot point and the robot turns beside the row instead of onto it.
+# (History: 0.20 was a pure guess; 0.38 was the ESP32-CAM at 15cm high seeing a 34cm strip.)
+_ARRIVE_EXTRA_M = 0.41
 _ARRIVE_MAX_S   = 6.0
 
 
@@ -1222,14 +1551,15 @@ def _creep(metres):
     time.sleep(0.3)
 
 
-def _arrive_over_lateral(src):
+def _arrive_over_lateral(bus):
     """Creep until the lateral is at the wheels. Returns the best nearness reached."""
     deadline = time.time() + _ARRIVE_MAX_S
     best = 0.0
     while time.time() < deadline:
         _drive(*trimmed(_BASE_PWM, _BASE_PWM), "drip", "forward")
-        ok, frame = src.read()
-        if not ok:
+        _t, frame = bus.latest()
+        if frame is None or bus.age() > bus.stale_after():
+            time.sleep(0.01)          # never judge arrival on a stale view
             continue
         c = detect_crossing(frame)
         if c["found"]:
@@ -1245,7 +1575,7 @@ def _arrive_over_lateral(src):
     return best
 
 
-def _turn_onto_tube(src, turn_right, tag):
+def _turn_onto_tube(bus, turn_right, tag):
     """Pivot onto the lateral, then centre the tube in frame before driving off.
 
     Still needed after the gyro: a geometrically perfect 90 deg turn does not put the robot
@@ -1263,7 +1593,7 @@ def _turn_onto_tube(src, turn_right, tag):
     last_x = None                          # last tube_x seen, to detect "nothing moved"
     pulse = _NUDGE_PULSE_S
     for i in range(_NUDGE_MAX + 1):
-        ok, frame = _fresh_frame(src)
+        ok, frame = _fresh_frame(bus)
         if not ok:
             log("  align: no frame after the turn — leaving it open-loop")
             return
