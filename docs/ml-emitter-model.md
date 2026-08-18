@@ -133,19 +133,85 @@ the model proposes rather than only what clears our gate:
 | confidence min / median / max | 0.603 / **0.916** / 0.997 |
 | frames clearing 0.50 / 0.70 / 0.90 | 56 / 49 / **29** |
 
-`cap_20260818_040718_843.jpg` scored **0.997** and human inspection of that frame found
-**plain drip tube and no emitter**. A high fire-rate with a high median and no gap in the
-distribution is the signature of a model answering *"tube"* rather than *"emitter"* — and it
-means **no value of `_EMIT_CONF` can separate them**. Do not spend time tuning the threshold
-against a model in this state; the fix is negatives in the training set.
+> ### ⚠️ CORRECTION 2026-08-18 — the headline claim above was WRONG
+>
+> An earlier version of this section said `cap_20260818_040718_843.jpg` scored **0.997** on a
+> frame holding *"plain drip tube and no emitter"*, and that became the main justification for
+> retraining. **That frame does contain emitter holes.** It was judged at full-frame zoom, where
+> a 4-6px hole is invisible; zooming later found them, and the model's detection at (238,60)
+> sits ~16px from one. The conclusion was never revisited after the zoom.
+>
+> **What survives:** a **73% fire rate** with a **0.916 median** and no gap in the distribution
+> is still a real problem and still justified the retrain. What does not survive is "it fires
+> confidently on bare tube", and the practical consequence is in the `_EMIT_CONF` note below.
+>
+> **The lesson worth keeping:** these emitters are 4-6px features. *Never judge a detection from
+> a full-frame view* — crop and upscale around the predicted centroid before deciding it is
+> wrong. Two conclusions in one day were withdrawn for exactly this.
 
-A retrain has worked when the plain-tube frames go QUIET while the labelled emitters still
-fire. It has **not** worked if everything merely scores lower — that just slides the overlap.
+A high fire-rate with a high median and no gap in the distribution is the signature of a model
+answering *"tube"* rather than *"emitter"*. Do not tune the threshold against a model in that
+state; the fix is negatives in the training set.
 
-> The emitters on this tube are **small dark punched holes in the tube wall, ~4-6 px across**
-> at 320x240, and there are commonly one or two per frame. They are only clearly visible when
-> zoomed; at 100% you will miss them, and a missed emitter in a saved frame actively teaches
-> the model that emitters are background. **Zoom in while labelling.**
+A retrain has worked when the plain-tube frames go QUIET while labelled emitters still fire. It
+has **not** worked if everything merely scores lower — that just slides the overlap.
+
+> The emitters on this tube show up **two ways**, and both matter for labelling:
+> * **small dark punched holes in the tube wall, ~4-6 px across** at 320x240; and
+> * **white/pale salt crust around the outlet** — the irrigation water is saline, so minerals
+>   deposit exactly where water evaporates. On a used stretch of tube the crust is the LARGER
+>   and more reliable cue, and the retrained model keys on it heavily.
+>
+> Both are only clearly visible zoomed; at 100% you will miss them, and a missed emitter in a
+> saved frame actively teaches the model that emitters are background. **Zoom in while labelling.**
+
+---
+
+## 5. Retrained model — 2026-08-18 (deploy_version 6, `squash`)
+
+Scored on `captures/dense/` — 298 frames sampled from a 2086-frame pass captured AFTER the
+training set was labelled, so a genuine held-out set.
+
+| | first model | **retrained** |
+|---|---|---|
+| frames firing (conf ≥ 0.05) | 73% | **38%** |
+| median confidence | 0.916 | 0.875 |
+| resize mode | fit-shortest | **squash** |
+
+**38% is consistent with the geometry rather than evidence of over-firing.** Emitters ~40cm
+apart against a 22cm visible strip means ~55% of frames should contain one, so the model fires
+slightly *under* the expected rate. High-confidence detections land on salt crust, i.e. on a real
+feature.
+
+### `_EMIT_CONF` is probably too high now — VALIDATE IT ON THE NEXT DRY RUN
+
+The plant trigger needs a detection in the lower 45% of frame (`_EMIT_MIN_Y_FRAC`) **and**
+confidence ≥ `_EMIT_CONF`. On the held-out set:
+
+```
+fired in the reach band : 76 / 298 (26%)   median confidence 0.843
+  gate 0.90 ->  19 frames would trigger    (~3 qualifying frames per emitter)
+  gate 0.80 ->  40 frames                  (~8 per emitter)
+  gate 0.70 ->  47 frames
+```
+
+0.90 sits **above** the reach-band median. Three qualifying frames per emitter is enough for the
+edge-triggered plant to fire once, but there is almost no margin.
+
+And note *why* 0.90 was chosen: to reject three "false positives on plain tube" scoring
+0.57 / 0.77 / 0.87 — and at least one of those frames contained real emitter holes (see the
+correction above). **The gate was set high partly on misread evidence.**
+
+`_EMIT_CONF` is now **0.80**. To validate it, run a drip dry run **with dataset capture ON** and
+check both directions:
+
+* **Too high** → the robot walks past emitters. Only visible if you have continuous frames,
+  because a skipped emitter leaves no `emitN_latM` frame behind. This is why capture matters:
+  drip mode does **not** enable it automatically (only scan mode does).
+* **Too low** → it stops at bare tube. Visible directly in the saved `emitN_latM` frames.
+
+Each stop logs its confidence, so the log plus the captures answer it in one run:
+`emitter 3 — STOPPED at 1.24m (conf 0.86, ml 0.86, y=181/240) [frame emit3_lat1_HHMMSS.jpg]`
 
 ---
 

@@ -545,14 +545,32 @@ _capture = {"on": False, "interval": 2.0, "count": 0, "last": 0.0}
 # Measure both with:  field_test.py fwd 55 10 0.83   -> metres/10 = m/s
 _BASE_PWM = 55
 _CAL_PWM  = 77            # the duty _DRIP_SPEED_MPS was observed at
-# Threshold on the model's RAW value now (see emitter_ml: the old 0.6 scaling plus a bogus
-# moisture bonus made 0.55 mean "ml >= 0.25"). The three known false positives on plain tube
-# scored 0.57 / 0.77 / 0.87, so anything at or below 0.87 would still accept them. 0.90 is a
-# starting point chosen to reject the KNOWN false positives — it is not validated against
-# real emitters, because we have no frame of a confirmed emitter to measure. If the next run
-# detects nothing at all, the model cannot separate emitter from tube and needs retraining
-# with plain-tube negatives.
-_EMIT_CONF, _EMIT_COOLDOWN = 0.90, 3.0
+# Threshold on the model's RAW value (see emitter_ml: the old 0.6 scaling plus a bogus moisture
+# bonus made 0.55 mean "ml >= 0.25").
+#
+# 0.90 -> 0.80 on 2026-08-18, for two reasons.
+#
+# FIRST, 0.90 WAS SET ON MISREAD EVIDENCE. It was chosen to reject three "false positives on
+# plain tube" scoring 0.57 / 0.77 / 0.87 — and at least one of those frames CONTAINED REAL
+# EMITTER HOLES. They are 4-6px features, invisible at full-frame zoom, and the frame was judged
+# without cropping in. So the gate was pushed above a detection that was actually correct.
+#
+# SECOND, the retrained model measures differently. On 298 held-out frames from the dense pass,
+# detections inside the reach band (y >= _EMIT_MIN_Y_FRAC) have a MEDIAN of 0.843 — so 0.90 sits
+# above the median of the readings the plant trigger acts on:
+#     gate 0.90 -> 19/298 frames qualify  (~3 qualifying frames per emitter over a full pass)
+#     gate 0.80 -> 40/298                 (~8 per emitter)
+# Three frames per emitter is enough for the edge-triggered plant to fire once, but there is
+# almost no margin, and a missed emitter is a skipped seed while a false positive is one wasted
+# seed. The costs are not symmetric.
+#
+# STILL NOT VALIDATED AGAINST REAL EMITTERS — 0.80 is measured against a distribution, not
+# against ground truth. Validate on a drip dry run WITH DATASET CAPTURE ON (drip mode does not
+# enable it automatically; only scan mode does). Too high shows up as the robot walking past
+# emitters, which leaves no emitN_latM frame behind and is only visible in continuous captures;
+# too low shows up directly in the emitN_latM frames as stops on bare tube. See
+# docs/ml-emitter-model.md section 5.
+_EMIT_CONF, _EMIT_COOLDOWN = 0.80, 3.0
 # WHERE in frame the emitter must be before we stop for it. The camera looks down AND
 # ahead, so an emitter first appears near the TOP of the frame — a metre or more away.
 # Confidence alone as the trigger meant the robot stopped the instant each emitter
