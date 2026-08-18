@@ -120,6 +120,33 @@ honest figure, upload one drive as Training and a *separate* drive as Test.
 Check whether errors are FN or FP — they mean different things: mostly-FN is fixable by
 lowering `_EMIT_CONF`; mostly-FP is made *worse* by it.
 
+### The bar to beat — measured baseline, 2026-08-18
+
+Scored with `scripts/score_emitter_model.py` against the 77 USB frames in `captures/usb/`
+(62 dataset frames + 15 detector-failure frames), probing at conf ≥ 0.05 to see everything
+the model proposes rather than only what clears our gate:
+
+| | first trained model |
+|---|---|
+| frames scored | 77 |
+| frames with **any** box | **56 (73%)** |
+| confidence min / median / max | 0.603 / **0.916** / 0.997 |
+| frames clearing 0.50 / 0.70 / 0.90 | 56 / 49 / **29** |
+
+`cap_20260818_040718_843.jpg` scored **0.997** and human inspection of that frame found
+**plain drip tube and no emitter**. A high fire-rate with a high median and no gap in the
+distribution is the signature of a model answering *"tube"* rather than *"emitter"* — and it
+means **no value of `_EMIT_CONF` can separate them**. Do not spend time tuning the threshold
+against a model in this state; the fix is negatives in the training set.
+
+A retrain has worked when the plain-tube frames go QUIET while the labelled emitters still
+fire. It has **not** worked if everything merely scores lower — that just slides the overlap.
+
+> The emitters on this tube are **small dark punched holes in the tube wall, ~4-6 px across**
+> at 320x240, and there are commonly one or two per frame. They are only clearly visible when
+> zoomed; at 100% you will miss them, and a missed emitter in a saved frame actively teaches
+> the model that emitters are background. **Zoom in while labelling.**
+
 ---
 
 ## 4. Deploy
