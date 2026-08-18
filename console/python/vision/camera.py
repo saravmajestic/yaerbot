@@ -425,7 +425,7 @@ class FrameBus:
         with self._lock:
             return self._interval
 
-    def stale_after(self, floor=0.35, mult=3.0, cap=3.0):
+    def stale_after(self, floor=0.15, mult=6.0, cap=3.0):
         """How old a frame must be before it means the stream has DIED.
 
         MEASURED, not assumed. A fixed 0.25s limit looked sensible for a 10fps camera and
@@ -434,6 +434,24 @@ class FrameBus:
         between frames and the robot spluttered instead of driving. The gate exists to catch
         a dead stream, not to punish a slow one, so it scales with what the camera is
         actually doing and only the floor and cap are fixed.
+
+        RETUNED 2026-08-18, from floor=0.35/mult=3 to floor=0.15/mult=6. The old FLOOR was
+        the binding constraint on the USB camera and nobody had noticed: 3 x 33.5ms is 0.10s,
+        so the floor decided everything, and 0.35s at 0.170 m/s is SIX CENTIMETRES of blind
+        driving before the motors stop. That floor was sized to protect the 1.4fps camera —
+        but `mult` already protects a slow camera far better than a fixed floor can (6 x
+        710ms saturates the 3s cap), so the floor was only ever binding on a FAST camera,
+        where it is least justified.
+
+        Now: 0.20s at 30fps, which is six frames and 3.4cm. Six frames of tolerance is
+        deliberately generous against jitter — the measured worst single read is 37ms — and
+        it is the same order as the tube-grace window, so the two fail-safes agree about how
+        long the robot may travel on nothing. The floor of 0.15 exists only for a camera
+        faster than 40fps, where 6 x interval would be tighter than any real jitter margin.
+
+        DO NOT tighten this to 3 x interval to save the last centimetre. That is the shape
+        of the mistake that caused the spluttering: the gate must catch a DEAD stream, and a
+        stream that hiccups for three frames is not dead.
         """
         iv = self.interval()
         if iv is None:

@@ -315,6 +315,44 @@ def test_the_growth_requirement_grows_with_the_sighting_span():
     assert longr["need_px"] > short["need_px"]
 
 
+def test_the_stale_frame_gate_bounds_blind_driving_at_both_frame_rates():
+    """How long the robot may drive on a frame before the stream counts as dead.
+
+    The old floor of 0.35s was the BINDING constraint on the USB camera and nobody had
+    noticed: 3 x 33.5ms is 0.10s, so the floor decided everything, and 0.35s at 0.170 m/s is
+    SIX CENTIMETRES of blind driving. That floor existed to protect the 1.4fps camera, but
+    `mult` protects a slow camera far better than a fixed floor can — so the floor was only
+    ever binding on a FAST camera, where it is least justified.
+    """
+    from vision.camera import FrameBus
+    m = _load_main()
+    v = m._DRIP_SPEED_MPS
+
+    class _Bus(FrameBus):
+        def __init__(self, iv):
+            self._iv = iv
+
+        def interval(self):
+            return self._iv
+
+    fast_limit = _Bus(FAST).stale_after()
+    assert fast_limit * v < 0.04, \
+        "%.2fs at %.3f m/s is %.1fcm of blind driving — too far" % (
+            fast_limit, v, 100 * fast_limit * v)
+    assert fast_limit >= FAST * 4, \
+        "must tolerate several frames of jitter, or a hiccup reads as a dead stream " \
+        "and the robot splutters — that exact mistake cost a field session"
+
+    slow_limit = _Bus(SLOW).stale_after()
+    assert slow_limit >= SLOW * 2, \
+        "a slow camera must not be punished: %.2fs vs a %.2fs frame interval" % (
+            slow_limit, SLOW)
+    assert slow_limit <= 3.0, "still bounded, so a dead stream is always caught"
+
+    assert _Bus(None).stale_after() == 3.0, \
+        "before any measurement, assume the worst rather than a guess"
+
+
 def test_the_capture_interval_can_be_set_without_restarting_capture():
     """A control that silently does nothing is worse than a missing control.
 
