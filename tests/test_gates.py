@@ -17,6 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import pytest
+
 from test_console_imports import _load_main            # noqa: E402  (shared stub harness)
 
 FAST = 0.0335        # USB webcam, measured 29.8 fps
@@ -84,6 +86,60 @@ def test_track_still_accepts_normal_drift():
         x += 6.0
         out = m._track_tube(_tube(x=x), 320, now + i * FAST, g["jump_px"])
         assert out["found"] is True, "6px of drift per frame is the real signal"
+
+
+def test_relock_needs_the_rejected_readings_to_AGREE():
+    """The old rule counted six consecutive rejects and believed whichever frame happened to be
+    sixth. Measured over 2086 consecutive frames, 3 of 9 relock events were onto pure scatter —
+    spreads of 185px, 79px and 54px — and a relock onto noise poisons the gate for every frame
+    after it. Six readings agreeing on a new position is evidence; six scattered ones are not.
+    """
+    m = _load_main()
+    g = m._gates(FAST)
+    now = 1000.0
+
+    # SCATTER: six rejects all far from the anchor but nowhere near each other
+    m._track_reset()
+    m._track_tube(_tube(x=160.0), 320, now, g["jump_px"], g["anchor_max_s"])
+    scattered = [10.0, 300.0, 60.0, 250.0, 120.0, 290.0]
+    out = None
+    for i, x in enumerate(scattered):
+        out = m._track_tube(_tube(x=x), 320, now + (i + 1) * FAST, g["jump_px"], g["anchor_max_s"])
+    assert out["found"] is False, "relocked onto scattered readings: %r" % out.get("relocked_to")
+    assert out.get("relocked_to") is None
+
+    # AGREEING: six rejects far from the anchor but tight with each other
+    m._track_reset()
+    m._track_tube(_tube(x=160.0), 320, now, g["jump_px"], g["anchor_max_s"])
+    # Ordered so the MEDIAN and the NEWEST differ: sorted median is 282, newest is 279. An
+    # earlier version of this test allowed any value in 279..283 and so could not tell the two
+    # apart — mutation testing caught it by anchoring on pend[-1] and still passing.
+    tight = [280.0, 281.0, 282.0, 283.0, 284.0, 279.0]
+    out = None
+    for i, x in enumerate(tight):
+        out = m._track_tube(_tube(x=x), 320, now + (i + 1) * FAST, g["jump_px"], g["anchor_max_s"])
+    assert out["found"] is True, "a consistent re-acquisition must be believed"
+    assert out.get("relocked_to") is not None
+    assert out["relocked_to"] != tight[-1], \
+        "anchored on the newest reading (%r) — one bad final frame then sets the anchor" % (
+            tight[-1],)
+    assert out["relocked_to"] == sorted(tight)[len(tight) // 2], \
+        "must anchor on the MEDIAN of the agreeing readings, got %r" % out["relocked_to"]
+
+
+def test_the_anchor_expires_on_distance_travelled():
+    """The second hatch: past some travel the old anchor cannot mean anything regardless of what
+    the readings look like, so the next reading is taken on trust."""
+    m = _load_main()
+    g = m._gates(FAST)
+    assert g["anchor_max_s"] * m._DRIP_SPEED_MPS == pytest.approx(m._TRACK_ANCHOR_MAX_M, rel=0.01)
+    m._track_reset()
+    now = 1000.0
+    m._track_tube(_tube(x=160.0), 320, now, g["jump_px"], g["anchor_max_s"])
+    # one reading, far away, long after the anchor went stale
+    out = m._track_tube(_tube(x=300.0), 320, now + g["anchor_max_s"] + 0.1,
+                        g["jump_px"], g["anchor_max_s"])
+    assert out["found"] is True, "a stale anchor must not veto a fresh reading for ever"
 
 
 def test_track_relocks_after_enough_rejections():

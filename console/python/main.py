@@ -34,6 +34,7 @@ try:
     from vision.vision import detect_tube, detect_emitter, detect_crossing, draw_overlay
     from vision.camera import FrameBus
     from vision.emitter_worker import EmitterWorker
+    from vision.odometry import FlowOdometer
     # Optional on-device ML emitter model (Edge Impulse via the object_detection
     # brick). Self-guards; falls back to classical detect_emitter if no model.
     from vision.emitter_ml import detect_emitter_ml, ml_available
@@ -681,8 +682,31 @@ _STEER_W_FAR = 0.5
 # So the gates are now expressed in the units the ROBOT cares about — metres of ground and
 # frames of evidence — and converted to seconds/pixels at run time from the camera's MEASURED
 # interval. A future camera change re-derives them instead of re-breaking them.
-_TRACK_RELOCK_N    = 6      # consecutive rejects before believing the new position
-_TRACK_STALE_S     = 1.5    # no accepted reading for this long -> accept the next one
+#
+# RE-ACQUISITION. The jump gate is necessary — it fires on 7% of a real pass — but it needs an
+# escape, or after the robot genuinely moves the gate would reject the true new position for
+# ever. Two hatches: enough consecutive rejects that AGREE, or an anchor too old to mean
+# anything.
+#
+# THE REJECTS MUST AGREE, and that is the fix. The old rule counted six consecutive rejects and
+# then believed WHICHEVER FRAME HAPPENED TO BE SIXTH. Measured over 2086 consecutive frames: of
+# 9 relock events, 6 were onto a consistent position (spread 1-22px) and 3 were onto pure
+# scatter — spreads of 185px, 79px and 54px. One relock in three was jumping the anchor onto
+# noise, which then poisons the gate for every following frame.
+#
+# So a relock now requires the pending rejects to lie within the jump gate OF EACH OTHER, and it
+# anchors on their MEDIAN rather than the last one. Six readings agreeing on a new position is
+# real evidence; six scattered readings are evidence of nothing.
+#
+# (The frame-budget audit predicted trouble here for a different reason — that this hatch and
+# the stale-anchor one had swapped which fires first, 4.3s/2-frames at 1.4fps becoming
+# 0.23s/39-frames at 26fps. That is true and it is why relock now does the work, but the swap
+# on its own was harmless; the missing agreement check was the actual defect.)
+_TRACK_RELOCK_N    = 6      # consecutive AGREEING rejects before believing the new position
+# How far the robot may travel before the anchor is meaningless regardless. Expressed in metres
+# so it survives a speed or frame-rate change; 0.25m is ~1.5s at 0.170 m/s, which is what the
+# old flat _TRACK_STALE_S = 1.5 amounted to at this speed.
+_TRACK_ANCHOR_MAX_M = 0.25
 
 # Vertical image scale, MEASURED 2026-08-18 using the 16mm drip tube as a ruler of known
 # width in every frame: the tube reads 20.9px across at the bottom row (0.76 mm/px) and
@@ -755,6 +779,8 @@ def _gates(interval=None):
         "grace_misses": _TUBE_GRACE_MAX_MISSES,
         # how far the emitter box may be out of date before it stops setting the creep
         "emit_stale_m": _EMIT_MAX_STALE_M,
+        # how long the tracking anchor stays meaningful, as a distance
+        "anchor_max_s": _TRACK_ANCHOR_MAX_M / v,
     }
 
 
@@ -782,7 +808,7 @@ def _gates_str(g):
 # band agreement on a fitted line, and _track_tube's temporal jump gate.
 _TUBE_MIN_FWHM_PX = 5
 _TUBE_MIN_SIGMA  = 2.5
-_track = {"x": None, "rejects": 0, "last_ok": 0.0}
+_track = {"x": None, "rejects": 0, "last_ok": 0.0, "pending": []}
 # Which gate is throwing frames away, counted over the log window. THE POINT IS THE RATIO:
 # a run that halts constantly looks identical in the log whether the tube is genuinely absent
 # or a threshold is miscalibrated, and on 2026-08-18 it was the threshold — for a whole session.
@@ -813,7 +839,7 @@ def _tube_plausible(tube):
 
 
 def _track_reset():
-    _track.update(x=None, rejects=0, last_ok=0.0)
+    _track.update(x=None, rejects=0, last_ok=0.0, pending=[])
 
 
 def _tube_with_grace(tube, now, gates):
@@ -857,7 +883,7 @@ def _tube_grace_reset():
     _tube_hold.update(t=0.0, tube=None, misses=0)
 
 
-def _track_tube(tube, w, now, max_jump_px):
+def _track_tube(tube, w, now, max_jump_px, anchor_max_s=1.5):
     """Accept, reject or re-acquire this frame's tube reading.
 
     `max_jump_px` comes from _gates() rather than a constant, because how far the tube can
@@ -874,15 +900,30 @@ def _track_tube(tube, w, now, max_jump_px):
         return out
     x = tube["tube_x"]
     prev = _track["x"]
-    stale = (now - _track["last_ok"]) > _TRACK_STALE_S
-    if prev is None or stale or abs(x - prev) <= max_jump_px \
-            or _track["rejects"] >= _TRACK_RELOCK_N:
-        _track.update(x=x, rejects=0, last_ok=now)
+    stale = (now - _track["last_ok"]) > anchor_max_s
+    if prev is None or stale or abs(x - prev) <= max_jump_px:
+        _track.update(x=x, rejects=0, last_ok=now, pending=[])
         return tube
+
+    # Rejected. Remember WHERE it wanted to go, because a run of rejects that agree with each
+    # other is a real re-acquisition and a run that scatters is noise — and the old code could
+    # not tell the difference.
+    pend = _track["pending"]
+    pend.append(x)
+    if len(pend) > _TRACK_RELOCK_N:
+        del pend[0]
     _track["rejects"] += 1
+    if len(pend) >= _TRACK_RELOCK_N and (max(pend) - min(pend)) <= max_jump_px:
+        anchor = sorted(pend)[len(pend) // 2]        # median, not the newest
+        _track.update(x=anchor, rejects=0, last_ok=now, pending=[])
+        out = dict(tube)
+        out["relocked_to"] = anchor
+        return out
+
     out = dict(tube)
     out.update(found=False, correction=0.0, far_correction=0.0, rejected_x=x,
-               reject_run=_track["rejects"])
+               reject_run=_track["rejects"],
+               pending_spread=round(max(pend) - min(pend), 1) if len(pend) > 1 else 0.0)
     return out
 
 
@@ -1088,6 +1129,13 @@ def _cam_loop(url):
 
 def _cam_loop_run(url, held):
     emit_worker = None          # bound BEFORE anything can read it (see the `holding` bug)
+    # MEASURE-ONLY. Integrates the ground the camera says the robot covered, alongside the
+    # wall-clock x _DRIP_SPEED_MPS figure the run actually acts on. Nothing reads it yet: the
+    # method is validated (response median 0.641 on 2085 real pairs, stationary frames read
+    # 0.06px) but it has never been compared against a KNOWN distance at creep duty, and
+    # _DRIP_SPEED_MPS is the number that decides where a row ends. Drive a measured distance,
+    # compare the two lines in the log, then promote it.
+    odo = FlowOdometer()
     travelled = 0.0             # estimated distance along the lateral this run
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
     armed = True                # detection-edge debounce (see the drip branch)
@@ -1195,7 +1243,9 @@ def _cam_loop_run(url, held):
         # arithmetic, and it means a camera that slows down (or is swapped) re-tunes the
         # plausibility limits instead of silently invalidating them.
         g = _gates(bus.interval())
-        tube = _track_tube(detect_tube(frame), w, now=now, max_jump_px=g["jump_px"])
+        odo.update(frame)          # ~1-2ms; measure-only, see the note at the top
+        tube = _track_tube(detect_tube(frame), w, now=now, max_jump_px=g["jump_px"],
+                           anchor_max_s=g["anchor_max_s"])
         tube, holding = _tube_with_grace(tube, now, g)
         # Loop rate, logged while a run is active. The whole point of decoupling the
         # emitter model was to raise this, so it should be visible rather than assumed.
@@ -1221,6 +1271,16 @@ def _cam_loop_run(url, held):
             # WHICH GATE IS DISCARDING FRAMES, as a ratio. "tube held 60%" tells you the robot
             # is struggling; this tells you WHY, and it is the line that would have caught the
             # width-gate bug on its first run instead of its fifth.
+            # THE CALIBRATION LINE. `travelled` is wall-clock x an assumed speed and gates
+            # end-of-row; `camera` is what the ground actually did. A run told to cover 5m
+            # covered about 7m and this is the number that would have said so at the time.
+            od = odo.stats()
+            log("  distance: travelled %.2fm (assumed %.3f m/s) | camera %.2fm "
+                "(%d frames, %d rejected) -> ratio %s"
+                % (travelled, _DRIP_SPEED_MPS, od["distance_m"], od["updates"],
+                   od["rejected"],
+                   "%.2fx" % (travelled / od["distance_m"]) if od["distance_m"] > 0.05
+                   else "n/a"))
             if _reject_tally:
                 tot = sum(_reject_tally.values())
                 top = sorted(_reject_tally.items(), key=lambda kv: -kv[1])[:4]
@@ -1265,6 +1325,7 @@ def _cam_loop_run(url, held):
         # worse, could start mid-traverse.
         if _run["state"] == "running" and prev_run_state != "running":
             phase, lateral, travelled, traversed = "follow", 0, 0.0, 0.0
+            odo.reset()
             cross_hist = []
             _track_reset()
             _tube_grace_reset()
