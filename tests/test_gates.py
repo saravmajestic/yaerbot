@@ -315,6 +315,40 @@ def test_the_growth_requirement_grows_with_the_sighting_span():
     assert longr["need_px"] > short["need_px"]
 
 
+def test_the_capture_interval_can_be_set_without_restarting_capture():
+    """A control that silently does nothing is worse than a missing control.
+
+    The interval used to be read in exactly ONE place (capture_start), so every other route
+    into capture used whatever was left in _capture. Scan mode turns capture on by itself
+    without consulting the slider, so moving the slider to 0.5s and pressing "Follow tube &
+    capture" saved 127 frames at the 2.0s default — 34cm apart, stepping over most emitters,
+    which was the exact problem the 0.5s was meant to solve.
+    """
+    m = _load_main()
+    h = m.ui.handlers
+    assert "capture_interval" in h, "the handler must be registered or the UI cannot reach it"
+
+    h["capture_start"](None, {"interval": 2.0})
+    assert m._capture["on"] is True and m._capture["interval"] == 2.0
+
+    h["capture_interval"](None, {"interval": 0.5})          # while running
+    assert m._capture["interval"] == 0.5, "must apply live, not on the next start"
+
+    h["capture_stop"](None, {})
+    h["capture_interval"](None, {"interval": 0.0})          # while stopped
+    assert m._capture["interval"] == 0.0, "must be settable before capture starts too"
+
+    # and scan mode must then inherit it rather than resetting to a default
+    m._capture["on"] = False
+    m._plot["corners"] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    m._cam["url"] = "usb"
+    m._VISION_OK = True
+    h["run_start"](None, {"mode": "scan"})
+    assert m._capture["interval"] == 0.0, \
+        "scan-mode auto-capture must use the operator's interval, not overwrite it"
+    h["run_stop"](None, {})
+
+
 def test_dense_capture_does_not_flood_the_operator_socket():
     """Dataset capture can now run at the full frame rate (interval 0), which is what makes a
     consecutive-frame set possible at all. But _save_capture used to push a base64 thumbnail

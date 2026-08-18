@@ -33,6 +33,7 @@ try:
     import cv2  # noqa: F401
     from vision.vision import detect_tube, detect_emitter, detect_crossing, draw_overlay
     from vision.camera import FrameBus
+    from vision.emitter_worker import EmitterWorker
     # Optional on-device ML emitter model (Edge Impulse via the object_detection
     # brick). Self-guards; falls back to classical detect_emitter if no model.
     from vision.emitter_ml import detect_emitter_ml, ml_available
@@ -500,23 +501,23 @@ def _traverse_max():
 # and got steered on — the silent half of the stale-frame problem.
 _FRAME_MAX_AGE_S = 0.25   # unused: superseded by bus.stale_after(), which MEASURES the
                           # camera's real frame interval instead of assuming one
-_EMIT_TTL_S = 0.30
-# DELIBERATELY NOT TIGHTENED, and the arithmetic is why. Inference costs 70-90ms; at a 33ms
-# frame interval, running it on a 2cm budget (0.118s at 0.170 m/s) would spend 80ms of every
-# 118ms inside the model — 68% duty — and collapse the steering rate back to ~9Hz, which is
-# the exact problem this cache was introduced to solve. Rate-decoupling is the right call; the
-# defect was never the TTL itself.
+# INFERENCE RUNS ON ITS OWN THREAD (vision/emitter_worker.py), so this number no longer means
+# what its predecessor _EMIT_TTL_S meant, and the difference is the whole point of Phase 3b.
 #
-# The real defect is what the stale box was USED FOR. That cached `y` sets the creep distance
-# via _emitter_ground_m, so a 0.3s-old box misplaces the seed by up to 5cm — and seed
-# placement is one of the two decisions in this robot that no later frame can correct.
-# So: when the box is staler than this, RE-RUN INFERENCE ON A FRESH FRAME at the moment of the
-# stop, and use that. The robot is stationary by then, so the inference costs nothing it needs.
-# Falls back to the cached box if the fresh look finds nothing, so this can only ever improve
-# the estimate — it can never skip an emitter that the old code would have planted.
-# Phase 3 removes the cache entirely by moving inference to its own thread off the FrameBus.
+# _EMIT_TTL_S was a STALENESS BUDGET that the control loop paid for: at every expiry the
+# steering loop stopped for 80ms to run a model steering does not use, and in between it reused
+# an old answer while 9 fresher frames sat unexamined on the bus.
+#
+# This is a THROTTLE ON THE ACCELERATOR, which the control loop does not pay for at all. Left
+# at 0 the worker would run flat out and keep the inference container continuously busy for a
+# result the robot only needs while an emitter is in the reach band. Sizing it: that band is
+# the bottom 45% of the frame, ~108px, which at the measured 1090 px/m is ~10cm of ground and
+# ~0.6s of travel — so 0.15s gives four independent looks inside the window that matters.
+_EMIT_MIN_INTERVAL_S = 0.15
+# How far out of date the box may be before the creep distance stops trusting it. The box now
+# carries the CAPTURE TIME of its frame, so this is checked against measured age rather than
+# against when inference happened to start.
 _EMIT_MAX_STALE_M = 0.02
-_emit_cache = {"t": 0.0, "res": None}
 _cam_thread = None
 _BROWSER_FPS = 6                    # annotated frames/s pushed to the browser
 _WATCH_TTL   = 2.0                 # keep pushing this long after the last get_vision poll
@@ -1028,6 +1029,15 @@ def _cam_loop(url):
         log("camera loop CRASHED — releasing the camera and stopping the motors:\n%s"
             % traceback.format_exc())
     finally:
+        # STOP THE WORKER BEFORE THE BUS. It reads bus.latest() in a loop, and tearing the bus
+        # out from under it would just log an exception per iteration until it noticed.
+        worker = held.get("emit")
+        if worker is not None:
+            try:
+                worker.stop()
+            except Exception:                                  # noqa: BLE001
+                log("camera loop exit: emitter worker stop raised:\n%s"
+                    % traceback.format_exc())
         bus = held.get("bus")
         if bus is not None:
             try:
@@ -1041,6 +1051,7 @@ def _cam_loop(url):
 
 
 def _cam_loop_run(url, held):
+    emit_worker = None          # bound BEFORE anything can read it (see the `holding` bug)
     travelled = 0.0             # estimated distance along the lateral this run
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
     armed = True                # detection-edge debounce (see the drip branch)
@@ -1071,6 +1082,24 @@ def _cam_loop_run(url, held):
         bus = FrameBus(_stream_url(url), reopen_after_s=_CAM_STALE_S, on_log=log)
         held["bus"] = bus       # reachable from the finally BEFORE start() can raise:
         bus.start()             # __init__ opens nothing, start() is what claims the device
+        # Inference gets its own thread off the same bus. `detect` closes over the ML/classical
+        # fallback so the worker itself stays testable with a stub detector.
+        #
+        # CAREFUL IF THE MOISTURE PROBE IS EVER REFITTED. _moisture_min() is handed to a second
+        # thread here. It is safe today only because MOISTURE_PRESENT is False, so it returns
+        # None without touching the Bridge — and the probe cannot be refitted anyway while the
+        # gyro holds A4/A5. Setting MOISTURE_PRESENT = True would start issuing Bridge RPCs
+        # from this thread concurrently with the control loop's, which the RouterBridge link has
+        # never been exercised for. Read the probe on the control thread and pass the value in.
+        def _detect_emit(frame, moisture=None):
+            r = detect_emitter_ml(frame, moisture=moisture) if ml_available() else None
+            if r is None or not r.get("ml_ready"):
+                r = detect_emitter(frame, moisture=moisture)
+            return r
+        emit_worker = EmitterWorker(bus, _detect_emit, moisture=_moisture_min,
+                                    min_interval=_EMIT_MIN_INTERVAL_S, on_log=log)
+        held["emit"] = emit_worker
+        emit_worker.start()
     except Exception as e:
         print("camera open failed: %s" % e, flush=True)
         return
@@ -1153,30 +1182,29 @@ def _cam_loop_run(url, held):
             # bug this replaces was invisible precisely because nothing ever printed the
             # gate next to the frame interval that decides what it means.
             log("  gates: %s" % _gates_str(g))
+            # The worker's own numbers. `latency` is what the control loop USED to pay per
+            # expiry and no longer does, so it is worth seeing; `skipped` being large is
+            # healthy — it means inference is keeping up with the bus rather than falling
+            # behind it.
+            if emit_worker is not None:
+                st = emit_worker.stats()
+                log("  emitter worker: %d inferences, %sms each, %d errors, box age %.0fms"
+                    % (st["runs"], st["latency_ms"], st["errors"],
+                       1000 * min(9.999, emit_worker.age(now))))
             loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
         elif _run["state"] != "running":
             loop_t0, loop_n, grace_n, bus_frames0 = now, 0, 0, bus.frames
 
-        # THE EMITTER MODEL NO LONGER PACES THE STEERING LOOP.
-        # Inference costs 70-90ms, and it ran on every frame ahead of the steering, so the
-        # control loop ticked at ~10Hz. That is the other half of the oscillation problem:
-        # a line-following robot gets away with crude control because it re-decides a
-        # thousand times a second, and at 10Hz every correction is acting on a stale view.
-        # Tube detection is ~2-3ms, so running it every frame and the model periodically
-        # gives the steering several times the rate for free.
-        #
-        # Holding a detection for _EMIT_TTL_S is safe: at 0.22 m/s the robot moves ~5cm in
-        # that window, the plant trigger additionally requires the emitter to be low in
-        # frame, and re-arming is edge-triggered — so a stale box cannot manufacture a
-        # second plant at the same emitter.
-        if (now - _emit_cache["t"]) >= _EMIT_TTL_S or _emit_cache["res"] is None:
-            moist = _moisture_min()
-            emit = detect_emitter_ml(frame, moisture=moist) if ml_available() else None
-            if emit is None or not emit.get("ml_ready"):
-                emit = detect_emitter(frame, moisture=moist)
-            _emit_cache["t"], _emit_cache["res"] = now, emit
-        else:
-            emit = _emit_cache["res"]
+        # THE EMITTER MODEL IS NOT ON THIS THREAD AT ALL ANY MORE.
+        # It runs in EmitterWorker off the same FrameBus, so this loop never waits 80ms for a
+        # model that steering does not use, and the answer arrives stamped with the CAPTURE
+        # TIME of the frame it was computed from. That stamp is the point: staleness is now
+        # measured rather than inferred from when inference last started, so the creep distance
+        # can be trusted or refused on evidence. See vision/emitter_worker.py.
+        emit_t, emit = emit_worker.latest() if emit_worker else (0.0, None)
+        if emit is None:
+            emit = {"detected": False, "position": None, "confidence": 0.0,
+                    "visual": False, "wet": False}
         _cam.update(w=w, h=h, tube=tube, emitter=emit)
 
         # Dataset capture: save the RAW frame at the chosen interval (for training
@@ -1194,7 +1222,6 @@ def _cam_loop_run(url, held):
             cross_hist = []
             _track_reset()
             _tube_grace_reset()
-            _emit_cache["t"], _emit_cache["res"] = 0.0, None
             last_plant_at, armed, driving_since = -1e9, True, None
         prev_run_state = _run["state"]
 
@@ -1369,13 +1396,15 @@ def _cam_loop_run(url, held):
                 # close the loop on. It is only viable because the creep speed is measured
                 # (0.170 m/s at PWM 55) and the distance is short.
                 # RE-CONFIRM ON A FRESH FRAME IF THE BOX IS STALE. The creep distance comes
-                # from the detection's ROW, so acting on a cached box places the seed wherever
-                # the emitter was up to _EMIT_TTL_S ago — 5cm at 0.170 m/s. The robot is
-                # stopped now, so this inference costs nothing it needs, and it FALLS BACK to
-                # the cached box if the fresh look finds nothing: strictly better placement,
-                # never a skipped emitter.
+                # from the detection's ROW, so acting on an old box places the seed wherever the
+                # emitter was when that frame was CAPTURED. The worker publishes that capture
+                # time, so the staleness below is measured in metres of real travel rather than
+                # assumed — which is what lets this fire only when it actually matters. The
+                # robot is stopped by now, so the extra inference costs nothing it needs, and it
+                # FALLS BACK to the existing box if the fresh look finds nothing: strictly
+                # better placement, never a skipped emitter.
                 emit_for_creep = emit
-                stale_m = (now - _emit_cache["t"]) * _DRIP_SPEED_MPS
+                stale_m = (now - emit_t) * _DRIP_SPEED_MPS if emit_t else 0.0
                 if stale_m > g["emit_stale_m"]:
                     ok_f, fresh = _fresh_frame(bus, budget_s=0.6)
                     if ok_f:
@@ -1899,6 +1928,25 @@ def on_capture_start(client, data):
     os.makedirs(_CAP_DIR, exist_ok=True)
     print("capture: ON (every %.1fs) -> %s" % (_capture["interval"], _CAP_DIR), flush=True)
     _emit_capture_status()
+
+def on_capture_interval(client, data):
+    """Set the capture interval LIVE, whether or not capture is currently running.
+
+    Without this the interval was read in exactly one place — on_capture_start — and every
+    other route into capture used whatever value happened to be left in _capture. That cost a
+    whole dataset on 2026-08-18: the operator moved the slider to 0.5s and pressed
+    "Follow tube & capture", which is on_run_start (scan mode), which turns capture on WITHOUT
+    consulting the slider. So 127 frames were saved at the 2.0s default — 34cm apart, stepping
+    clean over most emitters, which is the exact problem the 0.5s was meant to fix — and
+    nothing in the UI or the log contradicted the operator's belief that it was 0.5s.
+
+    A control that silently does nothing is worse than a missing control.
+    """
+    _capture["interval"] = max(0.0, float(data.get("interval", 2.0)))
+    print("capture: interval set to %.2fs%s" % (
+        _capture["interval"], "" if _capture["on"] else " (capture is off)"), flush=True)
+    _emit_capture_status()
+
 
 def on_capture_stop(client, data):
     _capture["on"] = False
@@ -2439,6 +2487,7 @@ ui.on_message("survey_stop",   logged("survey_stop",   on_survey_stop))
 ui.on_message("set_camera",    logged("set_camera",    on_set_camera))
 ui.on_message("drip_config",   logged("drip_config",   on_drip_config))
 ui.on_message("capture_start", logged("capture_start", on_capture_start))
+ui.on_message("capture_interval", logged("capture_interval", on_capture_interval))
 ui.on_message("capture_stop",  logged("capture_stop",  on_capture_stop))
 ui.on_message("capture_clear", logged("capture_clear", on_capture_clear))
 ui.on_message("get_capture",   on_get_capture)

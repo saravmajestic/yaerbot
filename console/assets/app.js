@@ -134,6 +134,12 @@ document.getElementById('drip-stop').addEventListener('click',  () => socket.emi
 // ── Dataset capture (collect the emitter training set while driving) ──────────
 const capInt = document.getElementById('cap-int');
 bind(capInt, 'cap-int-val');
+// PUSH THE INTERVAL AS SOON AS IT MOVES. It used to be read only when the capture Start
+// button was pressed, so setting the slider and then pressing "Follow tube & capture"
+// (a scan run, which turns capture on by itself) silently saved at the old default — it
+// cost a whole 127-frame dataset on 2026-08-18.
+capInt.addEventListener('change', () =>
+  socket.emit('capture_interval', { interval: parseFloat(capInt.value) }));
 document.getElementById('cap-start').addEventListener('click', () =>
   socket.emit('capture_start', { interval: parseFloat(capInt.value) }));
 document.getElementById('cap-stop').addEventListener('click', () => socket.emit('capture_stop', {}));
