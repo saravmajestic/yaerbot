@@ -228,7 +228,7 @@ the fuse*. The trigger was **movement** — a pack free to shift chafed/shorted 
 **The general lesson, which applies to every branch:** with a single 20A fuse, *any* short
 anywhere burns a wire instead of blowing the fuse, unless every conductor downstream is
 rated above 20A — and none of them are. **Fuse for the fault current, gauge for the running
-current.** Full table in `uno-q-wiring.md` → **Power Protection**.
+current.** The fused branches are drawn on sheet 1 of `docs/schematic/`.
 
 > Upgrading the wire alone is NOT the fix. A 3S LiPo will push 50–100A into a dead short,
 > and 1mm² still gets destructively hot at that — it just takes longer than the Dupont did.
@@ -246,7 +246,7 @@ weeks earlier, so nothing was inherently wrong with the design — something had
    That looked like a smoking gun (D11 is now the SG90's pin) — but the physical IN wire
    really was on A3, and only the diagram was out of date. *Trace the wire before
    theorising from a diagram.*
-2. Suspicion that A3 can't drive a GPIO output at all, since `uno-q-wiring.md` already
+2. Suspicion that A3 can't drive a GPIO output at all, since the pinout already
    records "SG90 was dead on A3". **A3 is fine for digital output** — it fails only for
    *servo* PWM (no timer channel). The overlay confirms A3=PA7 is in `digital-pin-gpios`.
 
@@ -674,7 +674,7 @@ Then re-deploy the `motor-control` app. The **Reboot** and **Shutdown** buttons 
 
 **Note:** the UI button and SSH `sudo poweroff` are the **same command** (`systemctl poweroff`) — no behavioral difference; only the power conditions differ.
 
-**Fix:** power the board via the **5V header pin** (XY-3606 → 5V/GND pins, set to exactly 5.0V, verify with multimeter), **not USB-C**. No VBUS → poweroff stays off. Bonus: frees the USB-C port. This matches the intended wiring in `uno-q-wiring.md`.
+**Fix:** power the board via the **5V header pin** (XY-3606 → 5V/GND pins, set to exactly 5.0V, verify with multimeter), **not USB-C**. No VBUS → poweroff stays off. Bonus: frees the USB-C port. This is the wiring drawn on sheet 1 of `docs/schematic/`.
 
 **Field workflow regardless:** the robot is powered by a LiPo through a switch — true "off" = **flip the switch**. The Shutdown button's job is the **clean OS halt first** (protects the eMMC) — tap Shutdown, wait ~15s for the halt, then cut power.
 

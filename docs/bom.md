@@ -1,9 +1,9 @@
 # Bill of Materials — as built
 
 Everything physically fitted to the robot that produced the demo, as of **2026-08-19**. Pin
-assignments below are taken from `firmware/farm_os/farm_os.ino`, not from memory. Wiring detail is
-in [`uno-q-wiring.md`](uno-q-wiring.md); the seeder mechanism is in [`seeder.md`](seeder.md); the
-schematics are in [`schematic/`](schematic/index.html) (open `index.html`).
+assignments below are taken from `firmware/farm_os/farm_os.ino`, not from memory. The circuit
+schematics are in [`schematic/`](schematic/index.html) (open `index.html`); the seeder mechanism is
+in [`seeder.md`](seeder.md).
 
 Prices are indicative Indian retail (₹, 2026). A dash means the item was already owned or came as
 part of a kit, so no separate price is meaningful.

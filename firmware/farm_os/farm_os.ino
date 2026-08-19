@@ -74,7 +74,7 @@ static float readBattRaw() {
 OneWire           ec_oneWire(TEMP_PIN);
 DallasTemperature tempSensor(&ec_oneWire);
 
-// ── Seeder pins (per uno-q-wiring.md v2 pinout) ─────────────────────────────
+// ── Seeder pins (drawn on sheet 3 of docs/schematic/) ───────────────────────
 #define SPOOL_PIN  10   // S3003 spool drive (1:1 gear / direct)
 #define DRUM_PIN   11   // SG90 drum metering (servos need a DIGITAL pin on UNO Q)
 #define PUNCH_PIN  A3   // solenoid MOSFET gate — ONE driver fires BOTH punches (on/off)

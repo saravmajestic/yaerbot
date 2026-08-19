@@ -76,10 +76,13 @@ model, and the model is installed back onto the same board. The loop closes on o
 
 ### Fully committed I/O
 
-The pin budget is spent: **A5 is the only free GPIO**, which is why the second solenoid
-driver shares a gate with the first and why the seeder's servos had to move to digital
-pins. That constraint drove several design decisions recorded in
-[`uno-q-wiring.md`](docs/uno-q-wiring.md).
+The pin budget is spent, and it drove real design decisions. The seeder's servos had to move
+to **digital** pins because `Servo` gives no motion at all on A3 — which then freed A3 for the
+solenoid's MOSFET gate. And **A4/A5 went to the gyro**, because they carry `Wire2` (i2c3), the
+only I2C the board actually exposes: the header pins silk-screened SDA/SCL have no I2C
+peripheral behind them on this core. That cost the battery monitor its input.
+
+Full sheets, colour-coded by net: [`docs/schematic/`](docs/schematic/index.html).
 
 ### Board behaviour we had to find the hard way
 
@@ -133,7 +136,7 @@ docs/                    see the index below
 |---|---|
 | [`demo-plan.md`](docs/demo-plan.md) | the 4-act storyboard, locked decisions, build status |
 | [`bom.md`](docs/bom.md) | **bill of materials, as built** — plus what was evaluated and rejected |
-| [`uno-q-wiring.md`](docs/uno-q-wiring.md) | **circuit reference** — pinout, inter-box cable, driver wiring, power protection |
+| [`schematic/`](docs/schematic/index.html) | **circuit schematics, as built** — power distribution and protection, drive, seeder, gyro. Colour-coded by net; generated from code by [`scripts/gen_schematic.py`](scripts/gen_schematic.py) so they cannot drift from the firmware |
 | [`seeder.md`](docs/seeder.md) | the seeding mechanism — spool, metering drum, solenoid punch |
 | [`ml-emitter-model.md`](docs/ml-emitter-model.md) | **the AI workflow** — capture → label → train FOMO → deploy on-device |
 | [`drive-precision.md`](docs/drive-precision.md) | open-loop drive model, calibration method, error budget |

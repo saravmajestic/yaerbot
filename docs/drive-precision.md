@@ -301,6 +301,8 @@ position  ← RTK GPS               (only if the field needs absolute reference)
 - [`bom.md`](bom.md) — parts identified to close these gaps
 - `docs/farm-os/wheel-encoder-build.md` — build/mount/wire the distance encoder
 - `docs/farm-os/troubleshooting.md` — connector, network and flashing failures
-- `docs/farm-os/uno-q-wiring.md` — pinout; `A5` free, `SDA`/`SCL` free for the IMU
+- `apps/farm-robot/docs/farm-os/uno-q-wiring.md` in the **ai-labs** repo — pinout as it
+  stood then. Superseded: the IMU went on **A4/A5** (`Wire2`), not the header SDA/SCL pins,
+  which have no I2C peripheral behind them. Current sheets: `docs/schematic/`
 - `firmware/farm_os/farm_os.ino` — `getDiag`, optional IBT-2 current sense (`CURRENT_SENSE`)
 - `scripts/field_test.py` (yaerbot) — `diag`/`fwd`/`turn`/`solve`/`tsolve`/`row`/`uturn`/`plan`
