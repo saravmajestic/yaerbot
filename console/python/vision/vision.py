@@ -108,9 +108,23 @@ def _profile_line(gray, axis, bg_win=81, min_sigma=2.0, min_w=10, max_w=95,
     if partner_win.max() > 1.2 * sigma:
         c, wd = (peak + partner) / 2.0, abs(partner - peak) * 2
         if min_w <= wd <= max_w:
-            centre, width, paired = c, wd, True
+            # PAIR-CENTRING MUST NOT LEAVE THE SEED WINDOW. The window says where the tube may be;
+            # the peak is chosen inside it, but the midpoint of a peak/partner pair can sit well
+            # outside — and nothing used to re-check that.
+            #
+            # Found 2026-08-19 on cap_20260819_094944: the caller asked for x=185 +/-20, i.e.
+            # 165..205, and this returned 147.5 — 38 px OUTSIDE the window, sitting on a dark soil
+            # region. Two of four bands were dragged off the tube that way, the line fit needs three,
+            # and the frame was rejected `line-fit-2-of-3` with the tube plainly visible. The robot
+            # stopped. Tightening the window could not help: at +/-20 the answer was still 147, and
+            # at +/-15 the band found nothing at all.
+            #
+            # The peak was on the tube. Only the pairing moved it. So when the pair centre leaves the
+            # window, keep the peak instead of reporting a position the caller explicitly excluded.
+            if seed is None or seed_win is None or abs(c - seed) <= seed_win:
+                centre, width, paired = c, wd, True
 
-    if centre is None:                             # no partner: fall back to the FWHM
+    if centre is None:                             # no partner, or its centre left the window
         centre, width = fwhm_centre, fwhm
 
     if not (min_w <= width <= max_w):

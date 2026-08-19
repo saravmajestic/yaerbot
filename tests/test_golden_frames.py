@@ -46,6 +46,15 @@ GOLDEN = {
     "cap_20260818_105926_367.jpg": (180, "midday: sun/shade boundary stronger than the tube"),
     "live_1245.png":              (150, "12:45 live grab: bottom band landed 70px off the tube"),
     "cap_20260818_104428_437.jpg": (55,  "10:44: 3-band took an overexposed edge, steered off row"),
+    # 2026-08-19, operator-captured: the robot STOPPED here with the tube plainly visible.
+    # Diagnosed in full — bands 0 and 3 land on the tube (181, 201) while bands 1 and 2 are dragged
+    # to 147 and 138 by a dark soil region beside it. The wrong bands are STRONGER than the tube
+    # (4.46 sigma against 3.46), so no confidence or width gate separates them, and the line fit
+    # needs three of four. Constraining pair-centring to the seed window does not rescue it: at the
+    # default +/-45 the bad centre is still inside the window, and at +/-35 or tighter the bands find
+    # nothing at all. Label is approximate — the two good bands bracket the tube at 181-201.
+    "cap_20260819_094944_877.jpg": (190, "operator frame: robot stopped, tube visible, soil beside it "
+                                         "outshines the tube in two of four bands"),
 }
 
 # 50px, set by LABEL PRECISION rather than by what makes the suite green: the labels were read
@@ -77,6 +86,10 @@ KNOWN_HARD = {
     # 2.8. There is no signal to find, and REJECTING is the correct answer — the detector does
     # reject it now. Kept as an xfail so the lighting limit is visible rather than forgotten.
     "cap_20260818_105926_367.jpg",
+    # see the note in GOLDEN: two bands are captured by a stronger dark soil region beside the tube.
+    # Kept as a visible xfail rather than left out, so it flips to a pass by itself if the band search
+    # ever learns to prefer continuity over raw strength.
+    "cap_20260819_094944_877.jpg",
 }
 
 
