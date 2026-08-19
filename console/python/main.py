@@ -2481,7 +2481,29 @@ def _emit_run():
 #     positive -> anti-clockwise (left) is positive  -> set _YAW_LEFT_POSITIVE = True
 #     negative -> anti-clockwise (left) is negative  -> set _YAW_LEFT_POSITIVE = False
 #   Then set _HEADING_CORRECT = True.
-_HEADING_CORRECT = True           # sign confirmed 2026-08-18, see below
+#
+# BACK OFF TO MEASURE-ONLY, 2026-08-19. The sign is confirmed and the plumbing works, but the
+# gyro has a SYSTEMATIC BIAS the firmware's per-hop estimate does not remove, so the corrector
+# would be integrating fiction. Measured with five STATIONARY yawHop calls at the real plot hop
+# length (2121 ms = startup -0.303s + 0.40m / 0.165 m/s) and ZERO PWM, so every degree below is
+# phantom:
+#
+#     +0.04, +0.41, +0.29, +0.44, +0.43   ->  +1.61 deg over 5 hops = +0.32 deg/hop
+#
+# ALL THE SAME SIGN, so it accumulates instead of cancelling. The firmware reported bias -0.21
+# dps on each call and still left ~+0.15 dps behind. A 13-hop row is +4.2 deg, which stays under
+# the 10 deg threshold — but _plot_yaw["err"] accumulates over the WHOLE run, and a 6-row run is
+# ~78 hops = ~25 deg of phantom drift. That is two or three spurious corrections, each pivoting
+# the robot up to 10 deg the WRONG way, on a robot whose veer we are trying to measure.
+#
+# So: log every hop, correct nothing. One dry run then gives real per-hop yaw WHILE DRIVING, which
+# can be compared against the +0.32 deg/hop phantom above to separate bias from true veer. Only
+# then is there a defensible correction — either a per-run tare (measure the phantom at run start
+# and subtract rate * hop_seconds) or a firmware fix to the bias window.
+#
+# Re-enabling this without doing that measurement first repeats the mistake that cost this project
+# a day: acting on a signal nobody had characterised.
+_HEADING_CORRECT = False          # sign confirmed 2026-08-18; OFF for bias, see above
 # CONFIRMED 2026-08-18 with the flashed firmware, which is better than the hand-spin because it
 # exercises the real path: yawHop(120, -120, 800) commands (+L,-R) = a RIGHT pivot, and the gyro
 # reported yaw_deg = -60.26. So a right turn reads NEGATIVE and a left turn reads POSITIVE.
