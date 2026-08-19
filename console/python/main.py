@@ -1709,6 +1709,18 @@ def _cam_loop_run(url, held):
             # produces numbers to tune against.
             if now - last_cross_log >= 1.0:
                 last_cross_log = now
+                # SAVE THE FRAME BEHIND EVERY TRAVERSE TICK. Added 2026-08-19 after a traverse
+                # failure could not be diagnosed at all: drip mode does not enable dataset capture,
+                # so a 1.6m traverse left exactly ONE frame — the decision frame — and the whole
+                # sequence that led to it was gone. The numbers said a crossing was "found" at
+                # nearness 0.93 from the very first frame and its y never moved (223 -> 218 -> 221
+                # -> 219 -> 218 -> 214 over 1.2m of driving), which is a feature fixed relative to
+                # the ROBOT rather than the ground; and the one frame we did keep contains no
+                # lateral at all. But with one frame there is no way to test a fix.
+                #
+                # ~1/s matches the log tick, so a 2m traverse costs about a dozen 25KB frames.
+                # The name carries the traversed distance, so a frame can be matched to its log line.
+                _tshot = _save_named(frame, "trav%d_%03dcm" % (lateral + 2, int(traversed * 100)))
                 log("  traverse %.2fm | found=%s y=%s near=%.2f w=%s s=%.1f %s | "
                     "sights %d/%d (%.0f%%, need %.0f%%) | grew %+.0fpx over %.2fm "
                     "(need %.0fpx)%s"
@@ -1724,7 +1736,8 @@ def _cam_loop_run(url, held):
                        # no run had reached the traverse branch since.
                        sights, tr["frames"], 100 * frac,
                        100 * _TRAVERSE_MIN_SIGHT_FRAC, grew, span_m, need_px,
-                       "" if far_enough else "  (still inside min-traverse)"))
+                       ("" if far_enough else "  (still inside min-traverse)")
+                       + (" [%s]" % _tshot if _tshot else "")))
 
             if far_enough and approaching and arrived:
                 _drive_stop("drip")
