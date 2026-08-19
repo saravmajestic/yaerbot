@@ -626,13 +626,40 @@ _CAL_PWM  = 77            # the duty _DRIP_SPEED_MPS was observed at
 # almost no margin, and a missed emitter is a skipped seed while a false positive is one wasted
 # seed. The costs are not symmetric.
 #
-# STILL NOT VALIDATED AGAINST REAL EMITTERS — 0.80 is measured against a distribution, not
-# against ground truth. Validate on a drip dry run WITH DATASET CAPTURE ON (drip mode does not
-# enable it automatically; only scan mode does). Too high shows up as the robot walking past
-# emitters, which leaves no emitN_latM frame behind and is only visible in continuous captures;
-# too low shows up directly in the emitN_latM frames as stops on bare tube. See
-# docs/ml-emitter-model.md section 5.
-_EMIT_CONF, _EMIT_COOLDOWN = 0.80, 3.0
+# 0.80 -> 0.60 on 2026-08-19, and this time against A FIELD RUN rather than a distribution. The
+# note that used to sit here predicted the failure exactly: "too high shows up as the robot walking
+# past emitters". It did. A 5m lateral with emitters every 0.40m — about 12 — stopped at TWO.
+#
+# The per-window emitter tally is what made it legible, and it is worth reading as the model's
+# confidence histogram on THIS camera:
+#
+#     window   frames with a box   passed 0.80   best conf
+#      1/1                              1        0.94  y=204   -> stopped
+#      7/93                             0        0.78  y=168
+#     14/95                             0        0.54  y=78
+#      1/4                              1        0.92  y=222   -> stopped
+#      0/92     model returned NOTHING on 92 consecutive frames
+#     13/95                             0        0.67  y=210
+#
+# TWO THINGS FOLLOW. The distribution is BIMODAL — 0.92-0.94 or 0.54-0.78, with nothing between
+# 0.80 and 0.92 — so 0.80 sat exactly in the empty band and admitted only the top mode. And the
+# 92-frame silent window is the control: on plain tube between emitters the model reports nothing
+# at all, so the mid-confidence boxes are not noise. It is under-confident, not wrong.
+#
+# WHY UNDER-CONFIDENT: the model was trained on Logitech C310 frames. The robot now has a
+# QHM-999RL — different lens, different field of view (0.43m of ground against the C310's 0.22m),
+# different colour rendering. The held-out median of in-reach detections was 0.843 on C310 frames;
+# the best-per-window figures above are 0.54-0.78. That is a systematic downward shift, which is
+# what a domain change looks like.
+#
+# So 0.60 is a STOPGAP with a real fix behind it: retrain on frames from this camera. It is the
+# right stopgap because the costs are asymmetric — a missed emitter is a skipped seed, a false
+# positive is one wasted seed — and because in DRY mode a false stop costs nothing at all.
+#
+# VALIDATE IT THE SAME WAY: every stop saves an emitN_latM frame. Look at them. Stops on bare tube
+# mean 0.60 is too low; a count near 12 on a 5m lateral with all frames on real emitters means it
+# is right. Do not raise it again on a distribution.
+_EMIT_CONF, _EMIT_COOLDOWN = 0.60, 3.0
 # WHERE in frame the emitter must be before we stop for it. The camera looks down AND
 # ahead, so an emitter first appears near the TOP of the frame — a metre or more away.
 # Confidence alone as the trigger meant the robot stopped the instant each emitter
@@ -669,6 +696,82 @@ def _emitter_ground_m(emit, h):
         return None
     frac = max(0.0, min(1.0, pos[1] / float(h)))     # 0 = top of frame, 1 = bottom
     return _PUNCH_TO_FRAME_FAR_M - frac * (_PUNCH_TO_FRAME_FAR_M - _PUNCH_TO_FRAME_NEAR_M)
+
+
+# WHAT THE EMITTER MODEL ACTUALLY REPORTED, per status window. Added 2026-08-19 after a run did
+# 125 inferences down a 5m lateral and stopped at ZERO emitters — with no way to tell which of
+# three things had happened:
+#
+#     the model returned nothing at all              -> retrain, or the wrong model is bound
+#     it returned boxes below _EMIT_CONF (0.80)      -> lower the gate, or retrain
+#     it returned confident boxes too HIGH in frame  -> _EMIT_MIN_Y_FRAC / geometry, not the model
+#
+# Three completely different fixes, and the log could not separate them. Two days of emitter
+# changes were made without this, which is exactly why they kept missing. detect_emitter_ml asks
+# the model with conf_min=0.3, so sub-threshold boxes DO come back and can be counted — the
+# information existed and was simply thrown away every frame.
+_emit_tally = {"frames": 0, "detected": 0, "conf_ok": 0, "reach_ok": 0,
+               "best_conf": 0.0, "best_y": None, "best_frame": None}
+
+
+def _emit_tally_reset():
+    _emit_tally.update(frames=0, detected=0, conf_ok=0, reach_ok=0,
+                       best_conf=0.0, best_y=None, best_frame=None)
+
+
+def _emit_tally_add(emit, in_view, detected, h):
+    """Record one frame's emitter observation against each gate in turn."""
+    _emit_tally["frames"] += 1
+    if not emit.get("detected"):
+        return
+    _emit_tally["detected"] += 1
+    conf = float(emit.get("confidence") or 0.0)
+    pos = emit.get("position")
+    y = pos[1] if pos else None
+    if in_view:
+        _emit_tally["conf_ok"] += 1
+    if detected:
+        _emit_tally["reach_ok"] += 1
+    if conf > _emit_tally["best_conf"]:
+        _emit_tally.update(best_conf=conf, best_y=y)
+
+
+def _emit_tally_line(h):
+    """One line that says which gate is losing the emitters, or that the model found none."""
+    t = _emit_tally
+    if not t["frames"]:
+        return None
+    if not t["detected"]:
+        return ("  emitters: model returned NOTHING on %d frames (asked at conf>=0.3). "
+                "Either no emitter was in view, or the model cannot see them — check a saved "
+                "frame before retraining." % t["frames"])
+    reach_px = h * _EMIT_MIN_Y_FRAC if h else 0
+    return ("  emitters: %d/%d frames had a box | %d passed conf>=%.2f | %d ALSO low enough "
+            "(y>=%.0f) | best conf %.2f at y=%s%s"
+            % (t["detected"], t["frames"], t["conf_ok"], _EMIT_CONF, t["reach_ok"], reach_px,
+               t["best_conf"], t["best_y"],
+               "  <- boxes are too HIGH in frame, not too weak"
+               if t["conf_ok"] and not t["reach_ok"] else
+               "  <- boxes are below the confidence gate"
+               if t["detected"] and not t["conf_ok"] else ""))
+
+
+def _emit_debounce(detected, armed, travelled, last_plant_at):
+    """Decide whether THIS frame plants, and what `armed` becomes. Pure, so it is testable.
+
+    Extracted 2026-08-19 because the re-arm condition was wrong for eight days and no test could
+    reach it: the decision lived inline in the camera loop, which needs a board and a run that
+    gets as far as the drip branch. The bug (re-arming on frame-exit while the camera's 0.43m view
+    is wider than the 0.40m emitter spacing, so it never re-armed) produced exactly one emitter per
+    lateral and was only visible in a field log.
+
+    Returns (plant_now, armed_next). The caller keeps its own tube-found check ahead of acting on
+    plant_now — stopping when the tube is lost takes priority over planting.
+    """
+    if not detected:
+        armed = True
+    plant = bool(detected and armed and (travelled - last_plant_at) >= _min_replant())
+    return plant, armed
 
 
 def _emitter_in_reach(emit, h):
@@ -1408,6 +1511,10 @@ def _cam_loop_run(url, held):
                 # are worth eyeballing", not as a fault count.
                 log("  suspect accepts: %d frame(s) jumped >=60%% of the gate "
                     "(first 12 saved as suspect-*.jpg; ~9%% is normal)" % _susp_n)
+            _et = _emit_tally_line(h)
+            if _et:
+                log(_et)
+            _emit_tally_reset()
             if _reject_tally:
                 # The hinted count is a SUBSET of the causes above, not a cause itself, so it is
                 # kept out of both the total and the top-4 — otherwise it would double-count and
@@ -1461,6 +1568,7 @@ def _cam_loop_run(url, held):
             odo.reset()
             cross_hist = []
             _susp_n = 0             # a second run must not inherit the first run's save budget
+            _emit_tally_reset()
             _track_reset()
             _tube_grace_reset()
             last_plant_at, armed, driving_since = -1e9, True, None
@@ -1606,7 +1714,15 @@ def _cam_loop_run(url, held):
                     "(need %.0fpx)%s"
                     % (traversed, cross["found"], cross["tube_y"], cross["nearness"],
                        cross["width"], cross["strength"], cross["polarity"] or "-",
-                       len(sights), len(cross_hist), 100 * frac,
+                       # sights and frames are ALREADY COUNTS. _traverse_track returns
+                       # {"sights": len(sights), "frames": len(hist)}, and this line wrapped both
+                       # in len() again -> TypeError: object of type 'int' has no len(). It killed
+                       # the camera loop on the FIRST traverse log line, which is why the robot
+                       # stopped dead after every row turn and why traverse has never once latched
+                       # in the field. Introduced when _traverse_track was extracted as a pure
+                       # function without updating this caller, and invisible because no test and
+                       # no run had reached the traverse branch since.
+                       sights, tr["frames"], 100 * frac,
                        100 * _TRAVERSE_MIN_SIGHT_FRAC, grew, span_m, need_px,
                        "" if far_enough else "  (still inside min-traverse)"))
 
@@ -1649,15 +1765,34 @@ def _cam_loop_run(url, held):
             # emitter seen at the top of the frame is metres away (see _EMIT_MIN_Y_FRAC).
             in_view  = emit["detected"] and emit["confidence"] >= _EMIT_CONF
             detected = in_view and _emitter_in_reach(emit, h)
-            # Debounce on the DETECTION EDGE, not on an assumed spacing: the model is
-            # what finds emitters, so "this one again" means "still in view". Re-arm
-            # once it clears the frame entirely (in_view, not detected — otherwise the
-            # same emitter re-arms the moment it drops below the reach line and gets
-            # planted twice). _min_replant() is only a floor against double-counting one
-            # emitter — it never TRIGGERS a plant, so a missed emitter simply means the
-            # next one is found normally.
-            if not in_view:
-                armed = True
+            # Debounce on the DETECTION EDGE, not on an assumed spacing: the model is what finds
+            # emitters, so "this one again" means "still nearby". _min_replant() is only a floor
+            # against double-counting one emitter — it never TRIGGERS a plant, so a missed emitter
+            # simply means the next one is found normally.
+            #
+            # RE-ARM ON LEAVING THE REACH ZONE (`detected`), NOT THE FRAME (`in_view`). This was
+            # `if not in_view` and the camera swap broke it:
+            #
+            #     camera ground coverage : 0.43 m   (measured on the QHM-999RL)
+            #     emitter spacing        : 0.40 m   (drip_config emitter_gap)
+            #
+            # With the view wider than the spacing there is ALWAYS an emitter somewhere in frame,
+            # so `in_view` never went False, `armed` never came back after the first plant, and a
+            # 5m lateral produced exactly ONE emitter — which is what the 02:26 run did (1 emitter
+            # over 5.01m where ~12 were expected). The old C310 saw a 22cm strip, so at 40cm
+            # spacing there were long gaps with nothing in view and frame-exit re-arming worked.
+            # Nothing about the logic changed; the lens did.
+            #
+            # THE COMMENT THIS REPLACES warned against exactly this change: "otherwise the same
+            # emitter re-arms the moment it drops below the reach line and gets planted twice".
+            # That warning predates _min_replant(), which was added afterwards for precisely that
+            # failure (the 03:33 run stopped at 2.73m and 2.84m on one emitter) and now covers it:
+            # 0.20 m at a 0.40 m spacing is comfortably above the re-entry transient and
+            # comfortably below a real gap. Re-entry is also impossible in practice — the robot
+            # only ever moves forward, so an emitter that has dropped out of the bottom of the
+            # reach zone cannot come back into it.
+            _emit_tally_add(emit, in_view, detected, h)
+            plant_ok, armed = _emit_debounce(detected, armed, travelled, last_plant_at)
 
             if not tube["found"]:
                 # NO TUBE IN VIEW -> STOP, whatever else is happening this frame.
@@ -1668,8 +1803,25 @@ def _cam_loop_run(url, held):
                 # operator hit Stop. Stopping is now decided first, not last.
                 _drive_stop("drip")
                 driving_since = None
-            elif detected and armed and travelled - last_plant_at >= _min_replant():
+            elif plant_ok:
                 _drive_stop("drip")
+                # CLEAR THE DRIVE CLOCK, or the whole stop gets billed as forward travel.
+                #
+                # This branch blocks for seconds — the creep to bring the emitter under the punch
+                # (~2.5s), the arm dwell, and in dry mode a 2s hold — and `travelled` is integrated
+                # as (now - driving_since) * _DRIP_SPEED_MPS on the next frame that drives. With
+                # driving_since left stale, that integral spans the entire stop: ~0.84m of phantom
+                # travel PER EMITTER, on top of the `travelled += gap` below which already counts
+                # the creep properly.
+                #
+                # The two stop paths around this one both clear it; this one did not, and the cost
+                # is not cosmetic because line ~1882 ends the lateral on `travelled >= _plot["l"]`.
+                # Measured on the 02:58 run: three emitters, travelled reported 5.37m while the
+                # calibrated camera odometer said 3.55m — a 1.82m over-count that ended a 5m
+                # lateral at about 3.5m of real ground. That is exactly the "robot stopped at 3m
+                # when it should go to 5m" symptom, and the `distance: ... ratio` line drifting
+                # 0.92x -> 1.40x -> 1.51x across the run is the same fault seen from the other end.
+                driving_since = None
                 # THE frame this stop was taken on, kept so a run can be audited after
                 # the fact: was it a real emitter, and was the robot actually on top of
                 # it? A confidence number in a log line cannot answer either.
@@ -2501,9 +2653,26 @@ def _emit_run():
 # then is there a defensible correction — either a per-run tare (measure the phantom at run start
 # and subtract rate * hop_seconds) or a firmware fix to the bias window.
 #
-# Re-enabling this without doing that measurement first repeats the mistake that cost this project
-# a day: acting on a signal nobody had characterised.
-_HEADING_CORRECT = False          # sign confirmed 2026-08-18; OFF for bias, see above
+# RE-ENABLED 2026-08-19, after the measure-only dry run supplied exactly that characterisation:
+#
+#     26 hops, +18.2 deg total apparent drift          = +0.70 deg/hop while driving
+#     stationary bias, +0.151 dps over a 3.33s hop     = +0.50 deg/hop
+#     => real veer                                      = +0.20 deg/hop
+#
+# MIND THE HOP LENGTH. The stationary samples were taken at 2121ms (a 0.40m hop) and read
+# +0.32 deg each, but that run used 0.60m hops = 3333ms, where the same +0.151 dps is +0.50 deg.
+# Comparing the two directly says "bias is half the drift"; scaling properly says it is 71% of it,
+# and the real veer is +0.20 deg/hop rather than +0.38. Always convert through the RATE.
+#
+# Either way, correcting the raw figure would have over-corrected by ~3.5x. The bias is now removed
+# per run by _plot_yaw_tare(), and this flag only takes effect once that tare has SUCCEEDED — see
+# the guard at the correction site, which keeps a run measure-only by itself if the tare is refused.
+#
+# The residual veer is still worth correcting, because it accumulates: the 2026-08-19 run was
+# +6.1 deg off heading by the first row change, and through row 2 that put the robot ~71cm sideways
+# of where it should have been against a 50cm row gap — which is why row 2 came back over row 1 to
+# marker 1. The turns were never the problem: worst pivot error that run was 1.7 deg.
+_HEADING_CORRECT = True           # sign confirmed 2026-08-18; bias tared per run since 2026-08-19
 # CONFIRMED 2026-08-18 with the flashed firmware, which is better than the hand-spin because it
 # exercises the real path: yawHop(120, -120, 800) commands (+L,-R) = a RIGHT pivot, and the gyro
 # reported yaw_deg = -60.26. So a right turn reads NEGATIVE and a left turn reads POSITIVE.
@@ -2513,11 +2682,89 @@ _YAW_LEFT_POSITIVE = True
 # correction the hardware can actually deliver. At 2-3 deg of veer per hop that is a correction
 # roughly every four hops — visible, but nothing like 13 hops of silent accumulation.
 _HEADING_ERR_LIMIT_DEG = 10.0
-_plot_yaw = {"err": 0.0, "hops": 0, "worst": 0.0, "corrections": 0}
+_plot_yaw = {"err": 0.0, "hops": 0, "worst": 0.0, "corrections": 0,
+             "bias_dps": 0.0, "tared": False, "suspect": 0}
+
+# How many stationary hops to average for the tare. The WINDOW is derived from the run's own hop
+# length (see _plot_yaw_tare) rather than fixed: the bias is applied as rate x hop_seconds, so
+# measuring it over the same interval it will be applied to is both the best signal-to-noise and
+# the least room for an arithmetic slip. Getting that conversion wrong is not hypothetical — it
+# made a 0.32 deg/hop measurement read as the bias for 0.60m hops when the true figure was
+# 0.50 deg/hop, and briefly put the real veer at nearly twice its actual value.
+#
+# 4 hops at the demo's 0.60m spacing is 4 x 3.33s = 13s of standing still before the wheels move.
+# That is the price of a correction that is not acting on fiction.
+_TARE_HOPS = 4
+_TARE_MS = 3000                   # fallback only, when the hop length is not known
+_TARE_MS_MIN, _TARE_MS_MAX = 1500, 3500
+# Refuse to tare if the samples disagree by more than this (deg/s). A consistent bias is what we
+# can subtract; a noisy one means the sensor is not behaving and subtracting its mean would inject
+# error rather than remove it.
+_TARE_MAX_SPREAD_DPS = 0.30
 
 
 def _plot_yaw_reset():
-    _plot_yaw.update(err=0.0, hops=0, worst=0.0, corrections=0)
+    _plot_yaw.update(err=0.0, hops=0, worst=0.0, corrections=0,
+                     bias_dps=0.0, tared=False, suspect=0)
+
+
+def _plot_yaw_tare(hop_ms=None):
+    """MEASURE the gyro's stationary drift rate and store it, so hops can be corrected for it.
+
+    `hop_ms` is the duration of the run's real forward hop. Passing it makes each tare sample the
+    same length as the hops the bias will be subtracted from, which is the whole point.
+
+    WHY. Measured 2026-08-19 on five stationary yawHop calls at zero PWM, real hop length:
+    +0.04, +0.41, +0.29, +0.44, +0.43 deg -> +0.32 deg/hop, ALL THE SAME SIGN. The firmware's own
+    per-hop bias estimate reported -0.21 dps each time and still left ~+0.15 dps behind, because
+    its sampling window is too short to separate a slow drift from the hop's real rotation.
+
+    That bias is not a rounding detail. Over the 26-hop dry run of 2026-08-19 the robot accumulated
+    +18.2 deg of apparent drift; the stationary rate accounts for +8.3 deg of it, i.e. MORE THAN
+    HALF. Correcting the raw number would have over-corrected by roughly 2x and bent the run in the
+    opposite direction, confidently.
+
+    A tare rather than a constant, because it is measured with the robot on the ground it is about
+    to run on, at the temperature it is actually at — a gyro's zero-rate offset moves with both.
+
+    This is deliberately NOT a substitute for fixing the firmware's bias window; it is the honest
+    thing to do from Python without another flash, and it is measured every run so it cannot go
+    stale the way a hard-coded offset would.
+    """
+    if not _gyro_ready():
+        log("heading tare: no gyro — correction stays off for this run")
+        return
+    ms = int(min(_TARE_MS_MAX, max(_TARE_MS_MIN, hop_ms or _TARE_MS)))
+    log("heading tare: measuring stationary drift, %d x %dms (%.0fs total) — "
+        "DO NOT MOVE THE ROBOT" % (_TARE_HOPS, ms, _TARE_HOPS * ms / 1000.0))
+    rates, rejects = [], 0
+    for i in range(_TARE_HOPS):
+        try:
+            r = json.loads(_decode(Bridge.call("yawHop", 0, 0, ms)))
+        except Exception as e:                                   # noqa: BLE001
+            log("heading tare: yawHop failed (%s) — correction stays off" % e)
+            return
+        if not r.get("ok"):
+            log("heading tare: yawHop said %s — correction stays off" % r.get("err", "?"))
+            return
+        rejects += int(r.get("rejected", 0))
+        rates.append(float(r.get("yaw_deg", 0.0)) / (ms / 1000.0))
+        log("  tare %d/%d: %+.3f deg over %dms = %+.3f dps (rejected %d)"
+            % (i + 1, _TARE_HOPS, r.get("yaw_deg", 0.0), ms, rates[-1],
+               r.get("rejected", 0)))
+    spread = max(rates) - min(rates)
+    mean = sum(rates) / len(rates)
+    if spread > _TARE_MAX_SPREAD_DPS:
+        log("heading tare: REFUSED — samples spread %.3f dps (limit %.3f), mean %+.3f. A bias "
+            "this noisy is not a bias; subtracting it would add error. Correction stays off and "
+            "this run is measure-only." % (spread, _TARE_MAX_SPREAD_DPS, mean))
+        return
+    _plot_yaw["bias_dps"] = mean
+    _plot_yaw["tared"] = True
+    log("heading tare: %+.3f dps (spread %.3f, %d spike samples rejected) = %+.2f deg per %dms "
+        "hop. Every hop's yaw now has bias x hop_seconds removed; correction is %s."
+        % (mean, spread, rejects, mean * ms / 1000.0, ms,
+           "ARMED" if _HEADING_CORRECT else "still off by config"))
 
 
 class _ProgressRobot(BridgeRobot):
@@ -2568,7 +2815,31 @@ class _ProgressRobot(BridgeRobot):
         self.x += distance_m * math.cos(rad)
         self.y += distance_m * math.sin(rad)
 
-        yaw = float(res.get("yaw_deg", 0.0))
+        # THE MCU DRIVES THE MOTORS ITSELF for yawHop, bypassing _apply(), so self._sent was never
+        # updated and _check_diag compared the MCU's real duty against a stale (0, 0). That
+        # produced 30 bogus "MCU received 46/55 but we sent 0/0" warnings in the 2026-08-19 run —
+        # one per hop and turn — which is worse than useless: it buries a GENUINE mismatch under
+        # noise. Record what we actually commanded.
+        self._sent = (l, r)
+
+        yaw_raw = float(res.get("yaw_deg", 0.0))
+        # SUBTRACT THE MEASURED STATIONARY DRIFT. bias_dps is 0.0 until _plot_yaw_tare() succeeds,
+        # so an untared run behaves exactly as before rather than half-correcting.
+        drift = _plot_yaw["bias_dps"] * (ms / 1000.0)
+        yaw = yaw_raw - drift
+
+        # A HOP WHOSE SAMPLES WERE MOSTLY THROWN AWAY IS NOT A MEASUREMENT OF ZERO. Hop 14 of the
+        # 2026-08-19 run came back `peak -186 dps, rejected 19, yaw +0.0`: the spike filter had
+        # discarded real rotation along with the artefact, and +0.0 read as "did not turn" when it
+        # meant "we do not know". It is still accumulated — it remains the best estimate available
+        # and discarding it would leave a silent hole in the drift total — but it is marked here
+        # and counted in the scorecard, so a recurring sensor fault shows up as a number instead of
+        # hiding inside a plausible-looking zero.
+        rej = int(res.get("rejected", 0))
+        suspect = rej > 5
+        if suspect:
+            _plot_yaw["suspect"] += 1
+
         _plot_yaw["err"] += yaw
         _plot_yaw["hops"] += 1
         if abs(yaw) > abs(_plot_yaw["worst"]):
@@ -2581,21 +2852,26 @@ class _ProgressRobot(BridgeRobot):
         # `rejected` is the MCU's spike filter (spurious ~-186 dps samples seen while stationary);
         # if it climbs above 1-2 per hop the gyro read path itself needs looking at, and nothing
         # else in the system would ever tell us. `judder` is a magnitude and must never be < 0.
-        log("  hop %2d: %.2fm  yaw %+5.1f  cum %+6.1f  (peak %+.0f dps, judder %.1f, "
-            "rejected %d, bias %+.3f)"
-            % (_plot_yaw["hops"], distance_m, yaw, _plot_yaw["err"],
-               res.get("peak_dps", 0.0), res.get("judder", 0.0),
-               res.get("rejected", 0), res.get("bias", 0.0)))
+        log("  hop %2d: %.2fm  yaw %+5.1f  cum %+6.1f  (raw %+5.1f - drift %+.2f | peak %+.0f "
+            "dps, judder %.1f, rejected %d, bias %+.3f)%s"
+            % (_plot_yaw["hops"], distance_m, yaw, _plot_yaw["err"], yaw_raw, drift,
+               res.get("peak_dps", 0.0), res.get("judder", 0.0), rej,
+               res.get("bias", 0.0),
+               "  <- SUSPECT: %d samples rejected, yaw unreliable" % rej if suspect else ""))
 
         e = _plot_yaw["err"]
         if abs(e) < _HEADING_ERR_LIMIT_DEG:
             return
-        if not (_HEADING_CORRECT and _YAW_LEFT_POSITIVE is not None):
-            # Say it loudly and keep driving. This is the number that decides whether the
-            # correction is worth enabling, and what sign it needs.
-            log("  HEADING DRIFT %+.1f deg over %d hops (worst hop %+.1f) — NOT corrected: "
-                "measure-only until the gyro sign is confirmed. See _YAW_LEFT_POSITIVE."
-                % (e, _plot_yaw["hops"], _plot_yaw["worst"]))
+        # THREE CONDITIONS, and the tare is the one that was missing. Without it the corrector
+        # integrates the gyro's stationary bias, which on 2026-08-19 was more than half the
+        # apparent drift — so it would have pivoted the robot on fiction. If the tare was refused
+        # (noisy samples, no gyro, RPC failure) the run stays measure-only BY ITSELF rather than
+        # needing someone to remember to switch it off.
+        if not (_HEADING_CORRECT and _YAW_LEFT_POSITIVE is not None and _plot_yaw["tared"]):
+            log("  HEADING DRIFT %+.1f deg over %d hops (worst hop %+.1f) — NOT corrected (%s)"
+                % (e, _plot_yaw["hops"], _plot_yaw["worst"],
+                   "no tare, so the bias is unknown" if not _plot_yaw["tared"]
+                   else "correction disabled by config"))
             _plot_yaw["err"] = 0.0          # do not let it grow without bound in the log
             return
         # drifted one way -> pivot the other. _pivot takes (magnitude, turn_right).
@@ -2634,8 +2910,14 @@ class _ProgressRobot(BridgeRobot):
             return
         # setMotors(-pwm, +pwm) swings CCW and INCREASES heading, so a positive delta is a LEFT
         # turn. Getting this backwards would send every row change the wrong way.
-        _pivot(abs(delta), delta < 0)
+        turn_right = delta < 0
+        _pivot(abs(delta), turn_right)
         self.heading = heading_deg
+        # Same reason as in forward(): pivotDeg drives the motors on the MCU, so record the duty
+        # the MCU will report or _check_diag flags every single turn as a mismatch. _pivot_timed
+        # uses (p, -p) for a right turn, and the MCU log confirms 120/-120.
+        p = int(self.turn_pwm)
+        self._sent = (p, -p) if turn_right else (-p, p)
         self._snap("gyro turn %+.0fdeg" % delta)
 
     def plant(self):
@@ -2653,6 +2935,14 @@ def _plot_loop():
     # A second run must not inherit the first run's accumulated drift — the same class of bug
     # that made a second run resume the previous run's `travelled`.
     _plot_yaw_reset()
+    # TARE BEFORE THE WHEELS TURN. The robot is stationary here by definition (the operator has
+    # just placed it on the first seed spot and pressed Start), which is the only moment a
+    # stationary drift rate can be measured without stopping the run to do it.
+    #
+    # Measured over the SAME duration as the run's real hops, computed from the configured seed
+    # spacing exactly as _ProgressRobot.forward does it.
+    _hop_ms = 1000 * max(0.0, CAL["startup"] + float(_plot["seed_gap"]) / CAL["speed"])
+    _plot_yaw_tare(hop_ms=_hop_ms)
     robot = _ProgressRobot(
         speed_mps=CAL["speed"], startup_s=CAL["startup"], pwm=int(CAL["pwm"]),
         left_trim=CAL["ltrim"], right_trim=CAL["rtrim"],
@@ -2687,9 +2977,13 @@ def _plot_loop():
         # went wrong is exactly when the drift history matters most.
         if _plot_yaw["hops"]:
             log("heading: %d hops measured, residual %+.1f deg, worst single hop %+.1f, "
-                "%d correction(s) applied"
+                "%d correction(s) applied | tare %s%s%s"
                 % (_plot_yaw["hops"], _plot_yaw["err"], _plot_yaw["worst"],
-                   _plot_yaw["corrections"]))
+                   _plot_yaw["corrections"],
+                   "%+.3f dps" % _plot_yaw["bias_dps"] if _plot_yaw["tared"] else "REFUSED",
+                   " | %d suspect hop(s) (>5 gyro samples rejected)" % _plot_yaw["suspect"]
+                   if _plot_yaw["suspect"] else "",
+                   "" if _plot_yaw["tared"] else " — run was MEASURE-ONLY"))
         else:
             log("heading: NO hops measured — yawHop never ran (no gyro, or every call "
                 "fell back to the timed hop). Veer was not being watched this run.")
