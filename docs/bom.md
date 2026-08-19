@@ -1,44 +1,71 @@
 # Bill of Materials — as built
 
-Everything physically fitted to the robot that produced the demo. Prices are indicative
-Indian retail (₹, 2026). Wiring detail and pin assignments are in
-[`uno-q-wiring.md`](uno-q-wiring.md); the seeder mechanism is in [`seeder.md`](seeder.md).
+Everything physically fitted to the robot that produced the demo, as of **2026-08-19**. Pin
+assignments below are taken from `firmware/farm_os/farm_os.ino`, not from memory. Wiring detail is
+in [`uno-q-wiring.md`](uno-q-wiring.md); the seeder mechanism is in [`seeder.md`](seeder.md); the
+schematics are in [`schematic/`](schematic/index.html) (open `index.html`).
+
+Prices are indicative Indian retail (₹, 2026). A dash means the item was already owned or came as
+part of a kit, so no separate price is meaningful.
 
 ## Compute & sensing
 
-| Item | Spec | Qty | ₹ |
+| Item | Spec / pins | Qty | ₹ |
 |---|---|---:|---:|
-| **Arduino UNO Q** | 4 GB RAM / 32 GB eMMC (ABX00173) — **primary board** | 1 | 6,000 |
-| ESP32-CAM | OV2640, WiFi, 5 V — drip-line vision | 1 | 589 |
-| Capacitive soil moisture sensor | Analog v1.2, corrosion resistant | 2 | 110 |
-| DS18B20 temperature probe | 1-Wire, waterproof, stainless | 1 | 48 |
-| Soil EC probe | DIY — 2× M3 stainless screws + divider, AC-driven from D13 | 1 | ~75 |
+| **Arduino UNO Q** | 4 GB RAM / 32 GB eMMC (ABX00173) — **the only computer** | 1 | 6,000 |
+| **QHM-999RL USB webcam** | SunplusIT `0806:0806`. **The robot's vision sensor.** Captured at 320×240 YUYV @ 30 fps; sees **0.43 m** of ground | 1 | — |
+| **MPU-6050 IMU** | 6-axis; **only the gyro's Z axis is used**, for closed-loop heading. **A4 = SDA, A5 = SCL** via `Wire2` | 1 | ~150 |
+| ESP32-CAM | OV2640 — **superseded, kept as a fallback**. See the note below | 1 | 589 |
 
-The UNO Q is the whole compute stack: the Qualcomm Linux side runs the web console, the
-on-device LLM planner and the Edge Impulse vision model; the STM32U585 MCU does
-real-time GPIO. No companion PC, no cloud inference.
+The UNO Q is the whole compute stack: the Qualcomm Linux side runs the web console, the on-device
+LLM planner and the Edge Impulse vision model; the STM32U585 MCU does real-time GPIO. No companion
+PC, no cloud inference.
+
+> **The camera and the gyro are the whole of the robot's sensing.** There are no soil probes and
+> no GPS fitted.
+
+> ### Why a USB webcam replaced the ESP32-CAM
+> The ESP32-CAM delivered **0.7–6.7 fps, erratic**. A robot creeping at 0.17 m/s travels **24 cm**
+> between frames at 0.7 fps, which no control gain can rescue — the loop was starved, not badly
+> tuned. The QHM-999RL delivers a steady **29.8 fps** over USB. Full measurements and the reason a
+> passive OTG adapter cannot work: [`usb-camera.md`](usb-camera.md).
+>
+> Two things about this camera are load-bearing and easy to lose:
+> - It has **continuous autofocus and powers up with it ON**, which is pure liability on a camera
+>   at a fixed height. Autofocus is disabled and focus pinned by a **udev rule** so it survives a
+>   replug (`scripts/99-farmcam-focus.rules`).
+> - **`/dev/video` indices are not stable across boots.** The camera is found by matching its name
+>   in sysfs, never by a hardcoded index.
 
 ## Drive
 
-| Item | Spec | Qty | ₹ |
+| Item | Spec / pins | Qty | ₹ |
 |---|---|---:|---:|
 | 4WD chassis + gear motors | 100 mm wheels, 6 mm shaft | 1 | — |
-| IBT-2 motor driver (BTS7960) | one per side, 2 motors each | 2 | — |
+| IBT-2 motor driver (BTS7960) | one per side, 2 motors each. **Left**: RPWM D3, LPWM D5, R_EN D7, L_EN D8. **Right**: RPWM D6, LPWM D9, R_EN D4, L_EN D12 | 2 | — |
+
+> PWM is available on **D3, D5, D6, D9** only, and calling `pinMode()` on a PWM pin *before*
+> `analogWrite()` kills PWM on that pin (outputs ~0 V). Both facts cost a session to find.
 
 ## Seeder
 
-| Item | Spec | Qty | ₹ |
+| Item | Spec / pins | Qty | ₹ |
 |---|---|---:|---:|
-| **S3003 servo** | spool / arm rotation — **D10** | 1 | ~250 |
+| **S3003 servo** | spool / arm rotation — **D10**. Calibrated: physical 90° ← servo command 64 | 1 | ~250 |
 | **SG90 micro servo** | 2-pocket metering drum — **D11** | 1 | 90 |
-| **JF-0530B solenoid** | push-pull, **12 V**, 5 N, 10 mm stroke, spring return — the punch | 1 | 433 |
+| **JF-0530B solenoid** | push-pull, **12 V**, 5 N, 10 mm stroke, spring return — the punch. **One fitted, at one end of the arm** | 1 | 433 |
 | IRLZ44N MOSFET | logic-level N-ch, solenoid low-side driver — gate on **A3** via 100 Ω | 1 | 39 |
-| 1N4007 diode | flyback across the coil, **band to +12 V** | 1 | ~3 |
+| 1N4007 diode | flyback across the coil, **band (cathode) to +12 V** | 1 | ~3 |
+| Gate resistors | **100 Ω** A3→gate series, **10 kΩ** gate→GND pulldown | 2 | ~2 |
 | Silicone tubing | 14 mm ID — passes a groundnut | 15 cm | ~50 |
 | Compression springs / M3 hardware / brass inserts | arm + tip assembly | — | ~200 |
 
-3D-printed parts (PETG/PLA, ~110 g total): seeder arm body, spool hub, drum, hollow tip
-housing, motor mounts, ESP32-CAM housing.
+3D-printed parts (PETG/PLA, ~110 g total): seeder arm body, spool hub, drum, hollow tip housing,
+motor mounts, camera mount, encoder disc + hub *(printed, not yet wired — see next revision)*.
+
+> **Servos work only on DIGITAL pins on the UNO Q** — A3 gives no motion at all, which is why the
+> spool and drum sit on D10/D11 and A3 was left to the MOSFET gate. Also: `Servo.detach()` /
+> `attach()` at runtime **hangs the MCU**, taking the RouterBridge down with it.
 
 ## Power — and its protection
 
@@ -49,14 +76,39 @@ housing, motor mounts, ESP32-CAM housing.
 | **Main fuse** | **20 A** blade + inline holder, on LiPo+ before the block | 1 | ~80 |
 | **Branch fuses** | **2 A** solenoid, **3 A** buck input, + holders | 2 | ~200 |
 | Terminal / distribution block, XT60 | — | 1 | ~150 |
-| Battery-sense divider | 10 k / 2 k + 100 nF at the node → **A4** | 1 | ~10 |
+| Battery-sense divider | 10 k / 2 k + 100 nF at the node → A4 — **currently disconnected**, see below | 1 | ~10 |
 | **1 mm² stranded wire** | ≈17 AWG, all power branches | 2 m | ~130 |
 
-> ⚠️ **Every power branch needs its own fuse, sized to its own wire.** A fuse protects
-> the thinnest wire downstream of it, not the load. A 20 A main fuse on a Dupont jumper
-> (~1.5 A) is not protection — the wire becomes the fuse, and on 2026-08-15 one caught
-> fire. **Fuse for the fault current, gauge for the running current.** Full analysis in
+> ⚠️ **Every power branch needs its own fuse, sized to its own wire.** A fuse protects the thinnest
+> wire downstream of it, not the load. A 20 A main fuse on a Dupont jumper (~1.5 A) is not
+> protection — the wire becomes the fuse. On **2026-08-15** the 12 V solenoid feed shorted while the
+> battery was being moved and **caught fire; the 20 A main fuse never blew.** Nothing was
+> electrically wrong: the solenoid had worked for days, the diode and MOSFET were both fine.
+> **Fuse for the fault current, gauge for the running current.** Full analysis in
 > [`troubleshooting.md`](troubleshooting.md) → `[Power]`.
+
+> **Power the UNO Q from its 5 V header pin, not USB.** USB creates a ground loop that corrupts the
+> ADC, and VBUS keeps the board from staying powered off.
+
+## Two pins the gyro cost us
+
+Worth recording, because it explains two features that look missing:
+
+The pins silk-screened **SDA/SCL** on the UNO Q header (D20/D21) have **no I2C peripheral behind
+them** on this core — the board overlay hands those pads to USART3 and leaves `i2c2` disabled. So
+`Wire.begin()` succeeds, every transfer fails, and a bus scan finds nothing no matter how correct
+the wiring is. `Wire2` (i2c3) is on **A4/A5**, and that is the only solderable I2C on the board.
+
+The MPU-6050 therefore had to take A4 and A5, which were already spoken for:
+
+| Casualty | Was | Now |
+|---|---|---|
+| **Battery monitor** | 10 k/2 k divider → A4 | `BATT_PRESENT 0`. `getBattery` answers `present:false` instead of reporting a floating pin. **Runs must pass `nobatt`.** |
+| **Gate sense** | `SENSE_PIN` = A5 | `GATE_SENSE 0` — `analogRead` on A5 would re-mux the pad and kill the I2C bus mid-run |
+| **Motor current sense** | `IS_L_PIN` = A5 | `CURRENT_SENSE 0` — never wired |
+
+The trade was worth it: heading went from ±5–10° of open-loop guesswork per turn to **0.3° worst
+error across four consecutive 90° turns.**
 
 ## Evaluated and deliberately NOT used
 
@@ -64,16 +116,17 @@ Recording these because the reasoning is part of the design.
 
 | Considered | Why rejected |
 |---|---|
-| **GPS + compass (BN-880)** | Consumer GPS is ±2–5 m; the demo plot is 3–6 m across, so it would be **less** accurate than dead reckoning, and gives no heading at rest. The problem is plot-scale *relative* odometry, not absolute position. |
-| **Stepper (28BYJ-48) for the arm** | Superseded by the S3003 servo — absolute positioning, fewer pins, no driver board, and the UNO Q has exactly one free GPIO to spare. |
-| Companion Raspberry Pi | Unnecessary: the UNO Q runs the LLM, the CV and the web console itself. |
+| **GPS + compass (BN-880)** | Consumer GPS is ±2–5 m; the demo plot is 3–6 m across, so it would be **less** accurate than dead reckoning, and it gives no heading at rest. The problem is plot-scale *relative* odometry, not absolute position. |
+| **Stepper (28BYJ-48) for the arm** | Superseded by the S3003 servo — absolute positioning, fewer pins, no driver board. |
+| **Companion Raspberry Pi** | Unnecessary: the UNO Q runs the LLM, the CV and the web console itself. |
+| **Header SDA/SCL pins for I2C** | Not a choice — they are electrically dead for I2C on this core. See above. |
 
 ## Identified for the next revision
 
-Not fitted for this demo, but they are the fix for the known open-loop limits:
+Not fitted for this demo. Each is the fix for a known limit rather than a new feature.
 
-| Item | Fixes |
+| Item | Fixes / adds |
 |---|---|
-| MPU-6050 / IMU | closed-loop heading — a skid-steer pivot turn rotates by scrubbing the wheels sideways, so its calibration changes with the ground. A gyro removes the whole class of problem. |
-| Wheel encoders (HC-89 slot + printed disc) | measured distance instead of timed dead reckoning |
-| ADS1115 | 16-bit ADC — the UNO Q's analog inputs are 0–3.3 V and easily disturbed |
+| **Second solenoid + punch tip** | The arm carries **2 outlets 180° apart** but only **one** punch is fitted, so half the arm's designed throughput is unused. |
+| **Wheel encoders** (slot sensor + the printed disc/hub, already made) | Measured distance instead of timed dead reckoning. Note encoders do **not** fix heading on a skid-steer — wheels slip by design in a pivot; that is the gyro's job. |
+| **ADS1115** 16-bit ADC over I2C | Restores the battery monitor **and** the current sense without needing a free analog pin — the cleanest way to undo what the gyro cost. |
