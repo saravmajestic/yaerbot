@@ -35,9 +35,9 @@ the robot actually did.
 | Topic | Decision |
 |---|---|
 | Surface | **Prepared seedbed** — weed-cleared and roughly levelled, i.e. the state land is actually in when it is sown |
-| Drip detection | **On-device trained model (Edge Impulse FOMO) PRIMARY** + classical CV fallback — this is the on-device "Physical AI" claim |
+| Drip detection | **Two complementary on-device detectors, both running during a drip run** — the trained Edge Impulse FOMO model finds the **emitters**; a classical OpenCV projection-profile detector finds the **tube** and produces the steering error. (Originally scoped as "model primary, classical fallback"; in practice they do different jobs, and both are load-bearing.) This is the on-device "Physical AI" claim |
 | Vision toolchain | Existing **capture flow → Edge Impulse FOMO → deploy via App Lab `object_detection` brick** (confirmed by `emitter_ml.py`) |
-| Planner brain | **Gemma 2B via Ollama** (staggered with vision, never concurrent). Reconciliation is deterministic; the LLM only **presents** the computed data (`data-in→prose-out`) — agentic tool-calling at ≤2B proved unreliable. Qwen 1.5B = fallback. Exact tag pending on-board `free -m`/latency |
+| Planner brain | **Qwen 2.5 1.5B via Ollama** — this is what the code actually defaults to (`farmos/planner/llm.py`, `webchat/server.py`); Gemma 2B is installed and selectable in the chat UI. Staggered with vision, never concurrent. Reconciliation is deterministic; the LLM only **presents** the computed data (`data-in→prose-out`) — agentic tool-calling at ≤2B proved unreliable. **Confirm with `ollama list` and caption the video to match whichever answers on camera.** |
 | Planner data | Two **real** calendars cached (Tamil panchangam Nokku Naal + biodynamic root/leaf/flower/fruit) + **real** weather (Open-Meteo). Prices are **MOCK for now** (real Agmarknet stubbed). Reconciliation computes dates; the model never invents them |
 | Plain-field spacing | **Timed dead-reckoning** (no new hardware, no pins), calibrated on the plot; report logs the executed path. Trailing-wheel encoder = optional stretch |
 | Drip spacing | **Model-driven** — plant at each detected emitter (no odometry needed) |
@@ -92,11 +92,11 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [✅] **Seeder firmware RPCs** — `indexSpool/dropSeed/punch/retract/plantSeed`
 - [✅] **Servo + motor-PWM coexistence** confirmed on-device (both drive *and* seeder servos work together)
 - [🟡] **Robust field connectors** — the recurring fault class. Power branches rewired in 1 mm² stranded and soldered; signal leads still being audited. Every branch now needs its own fuse sized to its own wire (see `troubleshooting.md` → `[Power]`).
-- [⬜] **Seeder mounted on chassis**, arm/tip reaches soil at demo ride height
+- [✅] **Seeder mounted on chassis**, arm/tip reaches soil at demo ride height — verified by the plain-land and drip runs on soil
 - [✅] **Act 2: plain-land seeding on soil** — multi-row serpentine (hop → 4-seed cross → row change) executed on real ground with seeds placed; run logged.
-- [⬜] **Act 3a: drip-follow seeding, no rotation** run end-to-end on the real drip line
+- [✅] **Act 3a: drip-follow seeding, no rotation** — runs end-to-end on the real drip line: follows the lateral, stops at detected emitters, plants, reaches the end of the row and turns. Placement measured **+0 to +10 mm** against a ±5 cm tolerance. Two open limits, both recorded in `demo-script.md` → *Do not say*: the model also fires on plain tube (a 12-emitter row draws ~14 stops), and the traverse onto the *next* lateral does not yet finish reliably.
 - [✅] **Act 3b: rotation-per-emitter seeding** — `indexSpool`→`plantSeed` per arm position; `indexSpool` now takes a **physical** angle (calibrated: physical 90° ← servo cmd 64), so the cross is a true cross.
-- [🟡] **Untethered power run** — runs on LiPo throughout. Outstanding: **branch fuses** (2 A solenoid, 3 A buck) before any further field work.
+- [✅] **Untethered power run** — runs on LiPo throughout, with **branch fuses fitted** (2 A solenoid, 3 A buck) after the 2026-08-15 fire. Power branches are 1 mm² stranded and soldered.
 
 ---
 
@@ -108,7 +108,7 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [✅] **LLM presentation** (`llm.present()`, data-in→prose-out): the LLM presents the computed data + alternatives; dates come from the reconciliation, not the model. **Gemma 2B > Qwen 1.5B** at faithful presentation (Qwen fudged alternatives; agentic tool-calling at ≤2B is unreliable — kept `converse()` but not the demo path).
 - [🟡] **Prices**: MOCK 3-yr monthly history (groundnut/corn/sesame, `prices_mock.json`) wired into the presentation; real Agmarknet (data.gov.in) path stubbed for a one-line swap
 - [✅] **Weather**: REAL — live Open-Meteo (no API key) with cache-fallback; near-term outlook + honest horizon flag (climatological normals for a date >16 days out = follow-up). Farm = Salem, TN
-- [🟡] **Chat/Plan tab**: standalone prototype built (`webchat/` — chat UI + server calling the planner + Gemma, dark console theme); integrate into the operator console as a tab next (later: voice)
+- [✅] **Chat/Plan tab**: integrated into the operator console as a real tab (`panel-plan` / `plan-chat` / `plan-send` in `console/assets/index.html`); `webchat/` remains as the standalone prototype
 - [✅] **On the UNO Q**: Ollama + Gemma/Qwen installed under `/home` (root untouched, 12 GB free); chat e2e works on-device. **Speed: Gemma ~1.9 tok/s, Qwen ~2.7 tok/s → a full answer ~1–2 min on this CPU** (RAM fine, ~1 GB free with model resident). **The architecture follows from that:** the deterministic reconciliation renders instantly as a card and the LLM's prose streams in after — the recommendation never waits on the model, because the model does not produce it.
 
 ### B2 — Path planning + spacing (Act 2)
@@ -122,23 +122,24 @@ Status: ✅ done · 🟡 partial (bits exist, not demo-ready) · ⬜ not started
 - [✅] **Calibration (2026-08-16, soil, 3S)**: `ltrim=0.83`, `speed=0.628`, `startup=0.099`, `tpwm=120`, `tdps=45.2`, `tstartup=-0.80`. Recalibrate after **any** mechanical/wiring change (`field_test.py solve`/`tsolve`). Three separate trim values had drifted apart across the console, the plot runs and the field tests — all now single-sourced.
 - [✅] **Self-checking field tests** — `getDiag` on the MCU + `BridgeRobot._check_diag`: every move compares what we sent vs what the MCU latched and drove, and prints a `!!` banner on mismatch. Also a **Diag tab** in the console tracing browser → console → MCU → driver pins → motor current.
 - [🟡] **Turn precision is the remaining gap** — ±5–10° per turn from coast, and it moves with the surface: a skid-steer pivot rotates by scrubbing the wheels sideways, so hard floor and loose tilth genuinely differ. Arc (radial) steering was added to the drive controls for gentle correction, which scrubs far less than a pivot. The **row change (`A→B→B1→C`) doubles it**: both 90° turns go the same way, so 10°/turn leaves the next row 20° skew. Mitigations added: lower turn duty, optional **deceleration ramp** (`tramp`), and a **`uturn` calibration mode** that tunes the row change as one primitive (measure "are the legs parallel" + lateral gap). Validate on real ground.
-- [⬜] **MPU6050 gyro (~₹150)** — closed-loop heading. The only real fix for turn accuracy (measures the angle instead of predicting it) and it **removes the need for trim** entirely. Free `SDA`/`SCL` pins. Strongly reconsider before the final recording.
+- [✅] **MPU6050 gyro — FITTED, and turns are now closed-loop.** Lives on **A4 (SDA) / A5 (SCL)** via `Wire2`/i2c3, *not* the header pins labelled SDA/SCL (those have no I2C peripheral behind them on this core — see `CLAUDE.md`). Measured: four consecutive 90° turns, worst error **0.3°**. Cost: A4 was the battery divider, so `BATT_PRESENT 0` and runs need `nobatt`.
 - [⬜] **Wheel encoder** (LM393 slot sensor, ~₹100) — closed-loop *distance*. Note encoders do **not** fix heading in a skid-steer (wheels slip by design during a turn); that's the gyro's job.
 
 ### B3 — Vision / on-device model (Act 3)
 - [✅] Classical CV — `detect_tube` (Canny→Hough→steering) + `detect_emitter` (offline-tested 4/4, 3/3)
 - [✅] `camera.py` source abstraction; `tube_follow.py` steer→plant loop *(on-device, end-to-end untested)*
 - [✅] **Camera tab** — UNO Q sole stream consumer, pushes annotated frames; **Drive-tab live feed fixed** (this session) + auto-connect
-- [✅] **ESP32-CAM** flashed/streaming (mDNS `farmcam.local`), OpenCV present in container
+- [✅] **Camera: a USB webcam on the board, ~30 fps** — this **replaced the ESP32-CAM** (which is still flashed and working at mDNS `farmcam.local`, kept as a fallback). Why, and the frame-rate measurements behind the switch: `docs/usb-camera.md`. Focus is locked by a udev rule so it survives a replug; note `/dev/video` indices are **not** stable across boots, so the source is identified via sysfs by name.
 - [✅] **`emitter_ml.py` FOMO scaffold** + ML-first-with-classical-fallback wired into `_cam_loop`
 - [✅] **Dataset-capture tool** (Camera tab: start/stop, interval, thumbnails, saves raw frames to `~/captures`)
-- [⬜] **Collect** field footage of the actual drip tube + emitters (cam mounted, demo lighting) — ~100–300 imgs
-- [⬜] **Label + train FOMO** in Edge Impulse (center-dot labels; class name must match `EMITTER_LABELS`)
-- [⬜] **Deploy** to UNO Q; verify `detect()` shape vs `_extract_boxes()`; `ml_available()` true
+- [✅] **Collect** field footage of the actual drip tube + emitters — captured by the robot itself via the Camera tab's capture mode
+- [✅] **Label + train FOMO** in Edge Impulse — 160×160, class `emitter`. Now on **v8**: the last retrain gained 3 detections, lost 0, and took mid-frame recall from 0 to 7 of 19 frames
+- [✅] **Deploy** to UNO Q; `detect()` shape verified against `_extract_boxes()`; `ml_available()` true; ~94–117 ms per inference on-device
 - [✅] **Dataset collected on the real drip line** (scan mode drives the tube and captures; the seeder is never touched)
 - [✅] **FOMO model trained + verified on the board** — 160×160, class `emitter`; detects at **99.3% confidence** on a real capture, run directly against the model runner
-- [🟡] **Deploy to the brick** — the model is on the board and the runner container is healthy; installing it through App Lab needs the USB cable
-- [⬜] **Field-tune** classical CV fallback thresholds against real footage
+- [✅] **Deploy to the brick — done, and it did not need the USB cable.** The model is bound in `app.yaml` (`arduino:object_detection: {model: ei-model-…}`), which is what makes App Lab launch `ei-obj-detection-runner` with our FOMO model instead of the stock `yolo-x`. Because it lives in `app.yaml` it survives `app start` and a reboot. **Failure is silent** — verify with `curl 127.0.0.1:1337/api/info` and check the labels read `['emitter']`. Full workflow: `docs/ml-emitter-model.md`
+- [✅] **Tube detection is now a projection-profile detector, field-tuned** — Canny/Hough was replaced: a black tube on dark soil gives too few edges. Four brightness-profile bands per frame, polarity **measured** rather than assumed, and a robust line fit across the bands that agree. Regression-tested against hand-labelled real frames (`tests/frames/golden`, `negative`, `shadow`, `align`)
+- [🟡] **Known limit — hard shadows.** A shadow edge crossing the row reads stronger than the tube; the detector correctly refuses and the robot stops and waits rather than steering off. 89% of field rejects are `sigma < 2.5`. Loosening that gate was measured and **rejected** (it also loosens `_tube_plausible`, which align depends on, and admits more emitter false positives). The fix is predictive tracking — designed and written up, not built. **Shoot the drip run in even light.**
 
 ### B4 — Report (Act 4)
 - [✅] **Report generator** — `farmos/report.py`: RunLog → self-contained **SVG farm map** (plot, boustrophedon path, planned vs planted dots, spacing/drift stats, planner rationale); unit-tested
@@ -162,22 +163,32 @@ One **complete** thread first, then the more ambitious pieces on top:
 
 ---
 
-## Status (2026-08-16)
+## Status (2026-08-19) — recording phase
 
-**Three of the four acts run end-to-end; the fourth is one cable away.**
+**All four acts run end-to-end on the real robot.** Demo footage is recorded. Coding is stopped;
+the remaining work is submission material. Shot-by-shot script, claims discipline and the
+criteria map: **[`demo-script.md`](demo-script.md)**.
 
 | Act | State |
 |---|---|
-| **1 — Planner** | Reconciliation + real calendars + live weather working on-device; Gemma presents the computed result. Prices are still mock. Chat UI is a standalone prototype, not yet a console tab. |
-| **2 — Plain-land seeder** | ✅ **Runs on soil.** Multi-row serpentine with a real row change, 4 seeds per stop, run logged and reported. |
-| **3 — Drip seeder** | Tube-following works on the real line. The trained model detects emitters at 99.3% but is not yet installed through App Lab (needs the USB cable), so the classical detector is what currently drives it. |
+| **1 — Planner** | ✅ On-device. Reconciliation + real calendars + live weather; the LLM presents the computed result and cannot invent a date. Now a real **console tab**, not a prototype. Prices still mock. Confirm which model is loaded before captioning. |
+| **2 — Plain-land seeder** | ✅ **Runs on soil.** Multi-row serpentine, real row change, 4 seeds per stop, logged and reported. Turns are now **closed-loop on the gyro** (worst error 0.3° over four 90° turns). |
+| **3 — Drip seeder** | ✅ **Runs on the real line.** Robot-collected dataset → Edge Impulse FOMO v8 → installed via `app.yaml` and serving on-board at ~100 ms/frame. Follows the lateral, stops at detected emitters, plants within ±5 cm (measured +0 to +10 mm). Two open limits: plain-tube false positives (~14 stops for 12 emitters) and the traverse onto the next lateral. |
 | **4 — Report** | ✅ Generated from logged positions — see [`../runs/`](../runs/) for real output. |
 
-**The honest weak point is reliability, not capability.** Every subsystem works; what still
-bites is the physical build — five separate connection faults in one week, one of which set
-a wire alight. The fixes are known and unglamorous: branch fuses sized to their own wire,
-solder instead of Dupont on anything carrying current, and flashing the camera firmware so a
-dropped WiFi association recovers by itself instead of needing a power cycle.
+**The honest weak point is still reliability, not capability** — but it has moved. The wiring
+faults that dominated the build are fixed (branch fuses sized to their own wire, solder instead of
+Dupont on anything carrying current). What remains is two vision limits, both understood and both
+written up rather than papered over:
 
-**Next, in order:** branch fuses → camera firmware → repeat full runs and count how many
-succeed. Nothing on that list is a new feature.
+1. **The emitter model fires on plain tube** at 0.97 confidence. No counting logic can fix that, so
+   the counting logic is **frozen** until the model is retrained with plain-tube and leaf-litter
+   negatives. 14-for-12 is accepted for the demo.
+2. **Hard shadows halt tube following.** The detector refuses rather than guessing, which is the
+   correct behaviour but stutters the run. Predictive tracking is designed, not built.
+
+Both are tracked with their evidence in
+`ai-labs/apps/farm-robot/docs/farm-os/todo.md`.
+
+**Next, in order:** circuit schematic → BOM refresh → architecture diagram → cut the video.
+Nothing on that list is code.
