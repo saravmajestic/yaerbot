@@ -55,10 +55,17 @@ find_cam() {
 DEV=$(find_cam) || { echo "ERROR: no UVC camera found"; exit 1; }
 echo "camera: $DEV  ($(cat "/sys/class/video4linux/$(basename "$DEV")/name"))"
 
+ODO=0
 case "${1:-}" in
 --show)
     v4l2-ctl -d "$DEV" -C focus_automatic_continuous,focus_absolute
     exit 0
+    ;;
+--odo)
+    # Handled below. Consumed HERE so it cannot fall through to the "bare number means set this
+    # focus" branch, which would reject it as "not a focus value" — it did exactly that once.
+    ODO=1
+    shift
     ;;
 esac
 
@@ -75,9 +82,17 @@ if [ -n "${1:-}" ]; then
     exit 0
 fi
 
+PAYLOAD=/probe/lock_focus.py
+if [ "$ODO" = "1" ]; then
+    PAYLOAD=/probe/calib_odometer.py
+    [ -f /tmp/calib_odometer.py ] || { echo "ERROR: scp scripts/calib_odometer.py unoq:/tmp/ first"; exit 1; }
+fi
+
 command -v docker >/dev/null || { echo "ERROR: docker not found"; exit 1; }
-[ -f /tmp/lock_focus.py ] || { echo "ERROR: copy scripts/lock_focus.py to /tmp first:"; \
-    echo "  scp scripts/lock_focus.py unoq:/tmp/"; exit 1; }
+if [ "$PAYLOAD" = "/probe/lock_focus.py" ]; then
+    [ -f /tmp/lock_focus.py ] || { echo "ERROR: copy scripts/lock_focus.py to /tmp first:"; \
+        echo "  scp scripts/lock_focus.py unoq:/tmp/"; exit 1; }
+fi
 
 # Restart the app WHATEVER happens — a sweep that dies must not leave the robot headless.
 restart_app() {
@@ -90,8 +105,15 @@ echo "stopping the app so the camera is free ..."
 docker stop "$CONTAINER" >/dev/null
 sleep 5
 
-CAM_DEV="$DEV" docker run --rm --privileged --user root --group-add 44 \
+TTY=""
+[ "$PAYLOAD" = "/probe/calib_odometer.py" ] && TTY="-it"   # interactive: you push, it prints live
+
+# shellcheck disable=SC2086
+CAM_DEV="$DEV" docker run --rm $TTY --privileged --user root --group-add 44 \
     -e CAM_DEV="$DEV" \
     -v "$APP":/app -v /tmp:/probe \
-    --entrypoint /usr/local/bin/python3 "$IMAGE" /probe/lock_focus.py \
-    2>&1 | grep -viE "gstreamer|INFO -|^\[ WARN"
+    --entrypoint /usr/local/bin/python3 "$IMAGE" "$PAYLOAD" \
+    2>&1 | grep -viE "gstreamer|INFO -|^\[ WARN" || true
+
+# --odo: hand-push odometer calibration (scripts/calib_odometer.py). Same container recipe,
+# different payload — kept here so there is one place that knows how to get OpenCV at the camera.
