@@ -16,9 +16,16 @@
 # OpenCV reports "can't open camera by index" even under --privileged (the nodes are root:video
 # 0660). That cost a while to find, so it is spelled out here.
 #
+# It uses the IMAGE's python (/usr/local/bin/python3), not the app's venv. cv2 ships in the image
+# at /usr/local/lib/python3.13/site-packages/cv2 — the venv under .cache is for the app's own
+# dependencies and does not carry OpenCV.
+#
 # NOTE ON PERSISTENCE: focus and autofocus are driver-side controls with NO persistence. They
 # reset when the camera is replugged or the board reboots, and the camera powers up with
-# autofocus ENABLED. Re-run this after either. If it becomes routine, a udev rule is the fix.
+# autofocus ENABLED. That is handled by scripts/99-farmcam-focus.rules, a udev rule that
+# re-applies the value on every plug event — install it once and this script becomes a
+# re-measuring tool rather than something to remember at start of day. Verified on the board:
+# the settings survive the app closing and reopening the camera, so a plug-time rule is enough.
 
 set -e
 
@@ -69,7 +76,6 @@ if [ -n "${1:-}" ]; then
 fi
 
 command -v docker >/dev/null || { echo "ERROR: docker not found"; exit 1; }
-[ -x "$APP/.cache/.venv/bin/python3" ] || { echo "ERROR: app venv missing at $APP"; exit 1; }
 [ -f /tmp/lock_focus.py ] || { echo "ERROR: copy scripts/lock_focus.py to /tmp first:"; \
     echo "  scp scripts/lock_focus.py unoq:/tmp/"; exit 1; }
 
@@ -87,5 +93,5 @@ sleep 5
 CAM_DEV="$DEV" docker run --rm --privileged --user root --group-add 44 \
     -e CAM_DEV="$DEV" \
     -v "$APP":/app -v /tmp:/probe \
-    --entrypoint "$APP/.cache/.venv/bin/python3" "$IMAGE" /probe/lock_focus.py \
+    --entrypoint /usr/local/bin/python3 "$IMAGE" /probe/lock_focus.py \
     2>&1 | grep -viE "gstreamer|INFO -|^\[ WARN"

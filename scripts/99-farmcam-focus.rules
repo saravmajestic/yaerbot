@@ -1,0 +1,54 @@
+# Lock the robot camera's focus whenever it is plugged in or the board boots.
+#
+# Install:
+#   scp scripts/99-farmcam-focus.rules unoq:/tmp/
+#   ssh unoq 'echo <sudo-pw> | sudo -S install -m 644 /tmp/99-farmcam-focus.rules \
+#       /etc/udev/rules.d/ && echo <sudo-pw> | sudo -S udevadm control --reload-rules'
+# Test without unplugging anything:
+#   ssh unoq 'echo <sudo-pw> | sudo -S udevadm trigger --action=add --subsystem-match=video4linux'
+#
+# WHY. The QHM-999RL powers up with continuous autofocus ENABLED, and focus/AF are driver-side
+# controls with no persistence — they reset on every replug and every boot. Measured on this
+# camera at the robot's real mounting height, sharpness (Laplacian variance) across
+# focus_absolute 0..1023 ran 28 to 324: an 11.6x spread with a clean unimodal peak at 272. A
+# hunting lens therefore intermittently destroys exactly what the tube detector gates on
+# (_TUBE_MIN_FWHM_PX, _TUBE_MIN_SIGMA), for no reason visible in the frame.
+#
+# A udev rule is enough here, which had to be checked rather than assumed: the usual warning is
+# that webcam controls reset when an application reopens the device, and this app opens the
+# camera at startup. Verified on the board — AF off + focus 272 survived a full
+# `docker restart motor-control-main-1`, so the rule firing at plug time is not undone later.
+#
+# ATTR{index}=="0" IS LOAD-BEARING. A UVC camera exposes two video4linux nodes with the same
+# name: the capture node (index 0) and a metadata node (index 1). Only the capture node carries
+# these controls, so without this the rule also fires on the metadata node and v4l2-ctl fails
+# there with "unknown control". Matching by vendor:product rather than by video number is the
+# other half — /dev/video indices are NOT stable on this board (the camera was video2 one day
+# and video0 the next, with the Qualcomm Venus codec taking the other pair).
+#
+# 272 IS SPECIFIC TO THE CURRENT CAMERA HEIGHT. Re-measure with scripts/lock_focus.sh if the
+# mount moves, and update this file — a stale value here is worse than autofocus, because it is
+# silent.
+
+# TWO SEPARATE RUN LINES, NOT ONE COMMAND WITH TWO -c FLAGS. This is the whole reason the first
+# version of this rule silently did nothing.
+#
+# v4l2-ctl bundles multiple -c flags into a single VIDIOC_S_EXT_CTRLS transaction, and
+# focus_absolute is flagged INACTIVE while autofocus is on. So the combined write fails
+# atomically and applies NEITHER control:
+#
+#     $ v4l2-ctl -d /dev/video0 -c focus_automatic_continuous=0 -c focus_absolute=272
+#     focus_absolute: Input/output error
+#     VIDIOC_S_EXT_CTRLS: failed: Input/output error
+#     $ v4l2-ctl -d /dev/video0 -C focus_automatic_continuous
+#     focus_automatic_continuous: 1        <- autofocus still ON
+#
+# udev reported this only as "failed with exit code 255" in the journal, and the camera simply
+# kept hunting. Split into two calls it works every time: turn AF off first, which makes
+# focus_absolute active, then set it.
+#
+# READBACK TRAP, same family as the gain/--get-ctrl one in fix_camera.sh: while AF is ON,
+# focus_absolute still reports the last value written to it. It is a stale echo, not the lens
+# position. Always confirm focus_automatic_continuous is 0 before believing focus_absolute.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="0806", ATTRS{idProduct}=="0806", ATTR{index}=="0", RUN+="/usr/bin/v4l2-ctl -d /dev/%k -c focus_automatic_continuous=0"
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="0806", ATTRS{idProduct}=="0806", ATTR{index}=="0", RUN+="/usr/bin/v4l2-ctl -d /dev/%k -c focus_absolute=272"

@@ -8,16 +8,18 @@ WHY THIS EXISTS. The QHM-999RL (SunplusIT 0806:0806) has CONTINUOUS AUTOFOCUS an
 with it enabled (focus_automatic_continuous=1, though the UVC default is 0). On a robot whose
 camera sits at a fixed height above the ground, autofocus is pure liability:
 
-  * Measured on the board, sweeping focus_absolute 0..1023 at 320x240: Laplacian-variance
-    sharpness ran from 58 to 1518 — a 26x SPREAD. Focus is not a subtle effect on this lens.
+  * Measured ON THE ROBOT at its real mounting height, sweeping focus_absolute 0..1023 at
+    320x240: Laplacian-variance sharpness ran 28 to 324 — an 11.6x SPREAD with a clean unimodal
+    peak at 272. (A room scene gave 58..1518, a 26x spread, peaking at 256 — same shape, more
+    absolute detail. Focus is not a subtle effect on this lens at any distance.)
   * The tube detector gates on exactly what defocus destroys. _TUBE_MIN_FWHM_PX = 5 and
     _TUBE_MIN_SIGMA = 2.5 test the profile's width and contrast, so a hunting lens produces
     intermittent `fwhm-N<5` and `sigma-N<2.5` rejects with no cause visible in the frame.
   * Focus breathing also changes apparent magnification slightly, which quietly moves every
     pixel-to-metre constant while the run is in progress.
 
-Autofocus is not stupid — measured on a room scene it settled at 265 against an optimum of
-256 — but it re-hunts whenever the scene changes, and each excursion costs up to that 26x.
+Autofocus is not stupid — on a room scene it settled at 265 against a measured optimum of 256 —
+but it re-hunts whenever the scene changes, and each excursion costs up to that whole spread.
 A fixed lens cannot hunt.
 
 OPENCV CANNOT DO THIS. cap.set(CAP_PROP_AUTOFOCUS, ...) and cap.set(CAP_PROP_FOCUS, ...) both
@@ -38,7 +40,11 @@ import time
 
 import cv2
 
-DEV = os.environ.get("CAM_DEV", "/dev/video2")
+DEV = os.environ.get("CAM_DEV", "/dev/video0")
+# Where the proof frame goes. In the wrapper's container only /probe is bind-mounted to the
+# host, so writing to the container's own /tmp put the frame somewhere that vanished with
+# --rm. A frame whose only purpose is to be looked at afterwards has to land outside.
+OUT_DIR = os.environ.get("OUT_DIR", "/tmp")
 # _IOWR('V', 28/27, struct v4l2_control { __u32 id; __s32 value; })  -- 8 bytes
 VIDIOC_S_CTRL = 0xC008561C
 VIDIOC_G_CTRL = 0xC008561B
@@ -82,6 +88,10 @@ def sharpness(cap, k=14):
     return vals[len(vals) // 2] if vals else 0.0
 
 
+# NOTE: focus_auto and focus_absolute are set in SEPARATE ioctl calls, and must stay that way.
+# focus_absolute is flagged INACTIVE while autofocus is on, so a combined VIDIOC_S_EXT_CTRLS
+# (which is what `v4l2-ctl -c a=0 -c b=272` issues) fails atomically with EIO and applies
+# NEITHER — leaving autofocus on while looking like it worked. See scripts/99-farmcam-focus.rules.
 def measure(cap, fd, v, settle=0.7):
     set_ctrl(fd, CID_FOCUS_ABS, v)
     time.sleep(settle)                 # the lens is a motor; it needs real time to arrive
@@ -152,14 +162,16 @@ def main():
         cap.read()
     ok, f = cap.read()
     if ok and f is not None:
-        out = "/tmp/focus_locked_%d.jpg" % chosen
+        out = os.path.join(OUT_DIR, "focus_locked_%d.jpg" % chosen)
         cv2.imwrite(out, f)
         print()
         print("saved %s — LOOK AT IT before trusting the number." % out)
     print()
-    print("Focus is now locked at %d, but ONLY until the camera is replugged or the board")
-    print("reboots: these are driver-side controls with no persistence. Re-run after either,")
-    print("or the lens goes back to hunting. See scripts/lock_focus.sh.")
+    print("Focus is now locked at %d for THIS SESSION only — these are driver-side controls"
+          % chosen)
+    print("with no persistence, and the camera powers up with autofocus ON.")
+    print("To make it survive replug and reboot, put this value in")
+    print("scripts/99-farmcam-focus.rules and install it (instructions at the top of that file).")
     cap.release()
     os.close(fd)
 
