@@ -26,9 +26,11 @@ not measured; measuring it end to end needs a tape measure and one push. Hence t
   this script is to stop guessing which.
 
 HOW TO USE
-  1. Put the robot on the ground it will actually run on, with a tape measure alongside.
-  2. Start this. It prints the accumulated distance continuously.
-  3. Push the robot SLOWLY and STRAIGHT along exactly 1.000 m, then stop.
+  1. Put the robot on the ground it will actually run on, with a tape measure alongside, and
+     mark the start and the 1.000 m point.
+  2. Start this. It counts down, then opens a fixed PUSH WINDOW (default 25s, set PUSH_S).
+  3. When it says PUSH NOW, push the robot SLOWLY and STRAIGHT to the 1.000 m mark and stop.
+     There is no keypress to end it — it stops by itself when the window expires.
   4. Read the final number and apply:
 
          PX_PER_M_DEPTH_new = 1090.0 * (reported_m / real_m)
@@ -53,6 +55,11 @@ from vision.odometry import FlowOdometer, PX_PER_M_DEPTH   # noqa: E402
 
 DEV_INDEX = int(os.environ.get("CAM_INDEX", "0"))
 REAL_M = float(os.environ.get("REAL_M", "1.0"))
+# A FIXED WINDOW RATHER THAN WAITING FOR Ctrl-C. The wrapper runs this over `ssh 'bash -s' <
+# script`, where stdin is the script itself, so there is no TTY and no way to send an interrupt:
+# docker refused `-it` outright with "the input device is not a TTY". A timed window needs no
+# terminal and makes the instruction unambiguous — the operator is told exactly when to push.
+PUSH_S = float(os.environ.get("PUSH_S", "25"))
 
 
 def main():
@@ -69,23 +76,37 @@ def main():
     odo = FlowOdometer()
     print("PX_PER_M_DEPTH currently %.1f — measuring against a real %.3f m" % (
         PX_PER_M_DEPTH, REAL_M))
-    print("Push the robot SLOWLY and STRAIGHT. Ctrl-C when you reach the mark.")
     print()
-    t0 = time.time()
-    try:
-        while True:
-            ok, f = cap.read()
-            if not ok or f is None:
-                continue
-            odo.update(f)
-            s = odo.stats()
-            if time.time() - t0 > 0.5:
-                t0 = time.time()
-                sys.stdout.write("\r  distance %.4f m | frames %d | rejected %d   " % (
-                    s["distance_m"], s["updates"], s["rejected"]))
-                sys.stdout.flush()
-    except KeyboardInterrupt:
-        pass
+    for n in (3, 2, 1):
+        print("  starting in %d ..." % n, flush=True)
+        time.sleep(1)
+    # Discard everything captured during the countdown, so a bumped robot or a hand withdrawing
+    # from the frame does not land in the measurement.
+    for _ in range(8):
+        cap.read()
+    odo.reset()
+    print()
+    print(">>> PUSH NOW — slowly and straight to the %.3f m mark. %.0f seconds. <<<"
+          % (REAL_M, PUSH_S), flush=True)
+    print()
+
+    t_end = time.time() + PUSH_S
+    t_tick = 0.0
+    while time.time() < t_end:
+        ok, f = cap.read()
+        if not ok or f is None:
+            continue
+        odo.update(f)
+        if time.time() - t_tick > 1.0:
+            t_tick = time.time()
+            st = odo.stats()
+            # A NEW LINE EACH TICK, not a \r rewrite: this output goes through a pipe on the way
+            # back over ssh, where a carriage return just overwrites into a buffer nobody flushes.
+            print("  %4.0fs left | distance %.4f m | frames %d | rejected %d"
+                  % (t_end - time.time(), st["distance_m"], st["updates"], st["rejected"]),
+                  flush=True)
+    print()
+    print("STOP — window closed.", flush=True)
 
     s = odo.stats()
     rep = s["distance_m"]

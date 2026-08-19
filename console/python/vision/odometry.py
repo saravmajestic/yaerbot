@@ -25,11 +25,35 @@ import cv2
 import numpy as np
 
 # Depth scale: how many pixels of vertical image shift one metre of forward travel produces.
-# MEASURED, not assumed — the 16mm drip tube is a ruler of known width in every frame, and it
-# reads 20.9px across at the frame bottom (0.76 mm/px) and 13.0px at the top (1.23 mm/px). A
-# 22cm visible strip over 240 rows implies 1.19 mm/px mean, which agrees. See main.py's
-# _PX_PER_M_DEPTH, which must stay in step with this.
-PX_PER_M_DEPTH = 1090.0
+#
+# RE-MEASURED 2026-08-19 FOR THE QHM-999RL, end to end: 729.2 px/m. The previous 1090.0 was a
+# Logitech C310 number (derived from the 16mm tube reading 20.9px at the frame bottom and 13.0px
+# at the top), and the C310 is gone. A different lens is a different field of view, so that
+# constant was simply the wrong camera's answer — it made this odometer under-report every
+# distance by a third.
+#
+# HOW IT WAS MEASURED, because deriving it from the frame geometry does not work: the frame
+# covers 43cm of ground top to bottom, which naively suggests 240/0.43 = 558 px/m — but this
+# class uses roi=(0.5, 1.0), the LOWER HALF only, and the view is oblique, so that half covers
+# less than half of the 43cm and its scale is correspondingly higher. Converting one to the other
+# needs the camera's height and tilt, which are not known. So it was measured directly instead:
+# scripts/calib_odometer.py runs this exact class over live frames while the robot is pushed a
+# tape-measured 1.000m by hand.
+#
+#     reported 0.6690 m over a real 1.000 m, 1199 frames, 0 rejected  ->  1090 * 0.669 = 729.2
+#
+# The run is trustworthy for two reasons beyond the number. The distance went FLAT at 0.6690 for
+# the last 19 seconds while the robot sat still, which proves the push was complete (an earlier
+# attempt was still climbing when its window closed and under-read at 648.5) and separately
+# confirms the signed-integration fix — the old rectified version would have accumulated noise
+# across those 19 stationary seconds. And 729.2 implies the lower half of the frame covers 16.5cm,
+# comfortably under the 21.5cm that zero perspective compression would give, so it is
+# geometrically self-consistent.
+#
+# One push, so treat it as +/- a few percent: 1.000m by tape has ~1cm of reading and stopping
+# error. Re-run scripts/calib_odometer.py if the camera is moved, re-aimed, or replaced, and keep
+# main.py's _PX_PER_M_DEPTH in step — they are two separate literals.
+PX_PER_M_DEPTH = 729.2
 
 # Below this correlation response the match is not trustworthy — featureless ground, motion
 # blur, or a frame the camera mangled. Measured p10 on real frames is 0.269, so 0.15 rejects

@@ -788,12 +788,20 @@ _TRACK_RELOCK_N    = 6      # consecutive AGREEING rejects before believing the 
 # old flat _TRACK_STALE_S = 1.5 amounted to at this speed.
 _TRACK_ANCHOR_MAX_M = 0.25
 
-# Vertical image scale, MEASURED 2026-08-18 using the 16mm drip tube as a ruler of known
-# width in every frame: the tube reads 20.9px across at the bottom row (0.76 mm/px) and
-# 13.0px at the top (1.23 mm/px). A 22cm strip over 240 rows implies 1.19 mm/px mean, which
-# agrees — so the frame geometry in _emitter_ground_m is sound and this is a real scale, not
-# a guess. Used to convert "how far has the crossing band moved" into "how far did we drive".
-_PX_PER_M_DEPTH = 1090.0
+# Vertical image scale. RE-MEASURED 2026-08-19 FOR THE QHM-999RL webcam: 729.2 px/m, by pushing
+# the robot a tape-measured 1.000m and reading the real FlowOdometer (scripts/calib_odometer.py) —
+# it reported 0.6690m over 1199 frames with 0 rejected, and went flat for the last 19 seconds,
+# which is what proves the push finished. Full derivation in vision/odometry.py.
+#
+# The old 1090.0 was a Logitech C310 measurement (16mm tube reading 20.9px at the bottom row,
+# 13.0px at the top). That camera is gone and this one has a wider lens, so 1090 was the wrong
+# camera's constant and made every camera-measured distance read a third short.
+#
+# Used here to convert "how far has the crossing band moved" into "how far did we drive", so the
+# traverse approach gate (_TRAVERSE_APPROACH_FRAC * span_m * _PX_PER_M_DEPTH) was demanding ~1.5x
+# more band movement than the geometry actually produces — i.e. it was harder to satisfy than
+# intended, which fits traverse never having latched in the field.
+_PX_PER_M_DEPTH = 729.2
 
 # HOW FAR THE TUBE COLUMN MAY MOVE, per second of elapsed time rather than per frame.
 # 900 px/s puts the gate at ~30px at 30fps and pins it to the ceiling on a slow camera, so
@@ -886,6 +894,18 @@ def _gates_str(g):
 # against no gate at all (87% vs 91%) and keeps a sanity check. The actual protection against
 # false positives is three-layered and none of it is this number: strength >= 2.5, three-of-four
 # band agreement on a fitted line, and _track_tube's temporal jump gate.
+#
+# STILL A C310 NUMBER, and the only one left (2026-08-19). Everything above — the 13-21px ruler,
+# the median of 14 — was measured on the old camera. The QHM-999RL has a WIDER lens: the depth
+# scale came out 729 px/m against the C310's 1090, so the same 16mm tube now projects to roughly
+# two thirds of its old width, i.e. about 9px rather than 14. A 5px floor still clears that, so
+# this is not urgent — but it is 5 against 9 instead of 5 against 14, and the margin has halved.
+#
+# MEASURE IT before trusting a tube-following run: put the drip tube in frame, save one frame, and
+# read `width_fwhm` out of detect_tube. If it comes back near 9 this constant is fine as-is; if it
+# comes back at 5-6 the floor is now cutting into real detections and must drop. This cannot be
+# derived from the depth scale — lateral and depth scales differ under an oblique view — so it
+# needs the tube, which is why it is recorded here rather than guessed at now.
 _TUBE_MIN_FWHM_PX = 5
 _TUBE_MIN_SIGMA  = 2.5
 _track = {"x": None, "rejects": 0, "last_ok": 0.0, "pending": []}

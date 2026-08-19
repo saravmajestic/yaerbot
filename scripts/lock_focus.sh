@@ -4,6 +4,10 @@
 #   ssh unoq 'bash -s' < scripts/lock_focus.sh            # find the optimum and lock it
 #   ssh unoq 'bash -s' < scripts/lock_focus.sh -- 264     # just set this value, no sweep
 #   ssh unoq 'bash -s' < scripts/lock_focus.sh -- --show   # print focus state and exit
+#   ssh unoq 'bash -s' < scripts/lock_focus.sh -- --odo     # hand-push odometer calibration
+#
+# --odo honours PUSH_S (push window, seconds) and REAL_M (the distance you push), e.g.
+#   ssh unoq 'PUSH_S=40 REAL_M=1.0 bash -s' < scripts/lock_focus.sh -- --odo
 #
 # WHY A WRAPPER. The sweep needs OpenCV, which only exists inside the app's venv in the
 # container; the V4L2 ioctls need the device, which the running app holds open (UVC allows one
@@ -103,17 +107,49 @@ trap restart_app EXIT INT TERM
 
 echo "stopping the app so the camera is free ..."
 docker stop "$CONTAINER" >/dev/null
-sleep 5
 
-TTY=""
-[ "$PAYLOAD" = "/probe/calib_odometer.py" ] && TTY="-it"   # interactive: you push, it prints live
+# WAIT FOR THE DEVICE TO ACTUALLY BE FREE, do not sleep and hope. `docker stop` returns when the
+# container is gone, but the UVC node can still be held for a moment afterwards, and a UVC device
+# allows exactly one opener — so the payload died with "could not open camera index 0" on a run
+# launched shortly after an app restart, while the identical command had worked minutes earlier.
+# A fixed `sleep 5` makes that failure random, which is the worst kind.
+printf "waiting for %s to be released" "$DEV"
+i=0
+while fuser "$DEV" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -gt 30 ]; then
+        echo
+        echo "ERROR: $DEV is still held after 15s. Who has it:"
+        fuser -v "$DEV" 2>&1 | head -5
+        exit 1
+    fi
+    printf "."
+    sleep 0.5
+done
+echo " free."
+sleep 1                 # a beat for the driver to settle after the last close
 
-# shellcheck disable=SC2086
-CAM_DEV="$DEV" docker run --rm $TTY --privileged --user root --group-add 44 \
-    -e CAM_DEV="$DEV" \
+# NO -it. This is normally invoked as `ssh unoq 'bash -s' < scripts/lock_focus.sh`, where stdin
+# is the script itself, so there is no TTY and docker fails outright with "the input device is
+# not a TTY". calib_odometer.py therefore uses a timed push window instead of waiting for Ctrl-C.
+# EVERY VARIABLE THE PAYLOAD READS IS PASSED EXPLICITLY, with an explicit value, and its default
+# resolved HERE rather than in the payload.
+#
+# PUSH_S=40 was ignored and the window ran for 25s with no error anywhere. The cause was dull:
+# the -e flags were simply absent from this docker run — an edit meant to add them matched
+# nothing and reported success. OUT_DIR was missing the same way, which is why the focus sweep's
+# proof frame kept landing in the container's own /tmp and dying with --rm.
+#
+# Passing `-e VAR="$VAR"` with the value spelled out, and defaulting here, makes both failures
+# impossible to repeat silently: if the variable is unset the default is visible in this file,
+# and the value the container receives is the one this script decided on rather than whatever
+# happened to be exported.
+: "${PUSH_S:=25}"
+: "${REAL_M:=1.0}"
+
+docker run --rm --privileged --user root --group-add 44 \
+    -e CAM_DEV="$DEV" -e OUT_DIR=/probe \
+    -e PUSH_S="$PUSH_S" -e REAL_M="$REAL_M" \
     -v "$APP":/app -v /tmp:/probe \
     --entrypoint /usr/local/bin/python3 "$IMAGE" "$PAYLOAD" \
-    2>&1 | grep -viE "gstreamer|INFO -|^\[ WARN" || true
-
-# --odo: hand-push odometer calibration (scripts/calib_odometer.py). Same container recipe,
-# different payload — kept here so there is one place that knows how to get OpenCV at the camera.
+    2>&1 | grep --line-buffered -viE "gstreamer|INFO -|^\[ WARN" || true
