@@ -2210,11 +2210,76 @@ _TURN_ON_COARSE = 90
 # is spent on stiction and the wheels never break away. Rather than guess a number that
 # works on one surface, start small and lengthen whenever the view does not change; the
 # camera says whether the last pulse did anything.
+# A BOUND ON HOW FAR THE SEARCH MAY ROTATE THE ROBOT, added 2026-08-19.
+#
+# The nudges escalate (0.30 -> 0.48 -> 0.75s, x1.6 capped) and, before this, nothing limited their
+# SUM. Seven iterations is 4.53s of motor-on, which at the measured 60-83 dps is 272-376 degrees —
+# more than a full turn. The 02:33 run issued 137 degrees of uncommanded rotation this way and
+# ended with the lateral running nearly horizontal in frame, which is the "turn ended at 45 deg"
+# and "turned more than 180 deg" symptom reported across several days. The gyro was never wrong:
+# the commanded pivot landed at err -0.0 deg and the SEARCH threw the heading away afterwards.
+#
+# 25 degrees is chosen as "more than any plausible landing error, far less than a lost heading".
+# Past it the run stops and says so, because a bounded failure the operator can nudge in five
+# seconds beats a robot at an arbitrary heading thrashing LOST/REGAINED ten times.
+_NUDGE_MAX_TOTAL_DEG = 25.0
+# Frames to sample per align decision, and how many must agree. A SINGLE frame is not enough: the
+# align loop acted on one reading, and on 2026-08-19 that reading was bare soil reported at 3.4
+# sigma (lat2_align2 — the saved frame contains no tube at all). That is the same false-positive
+# rate measured offline on the crossing-frame negatives, 1 in 9 passing every gate. Two of three
+# frames agreeing within a tube's width removes it, at a cost of ~150ms per decision.
+_ALIGN_FRAMES    = 3
+_ALIGN_AGREE     = 2
+_ALIGN_AGREE_PX  = 25.0
+# HOW FAR OFF CENTRE A TUBE MAY BE AND STILL BE THE ONE WE PIVOTED ON. See _align_is_ours: the
+# previous lateral is a real, perfectly tube-shaped tube and the ONLY thing wrong with it is its
+# position, so this is the only gate that can tell them apart. 70px is about 12.5cm of ground —
+# wider than a plausible landing error, and far narrower than the ~279px the previous lateral sits
+# at with a 0.50m row gap.
+_ALIGN_CENTRE_PX = 70.0
 _NUDGE_PULSE_S   = 0.30
 _NUDGE_PULSE_MAX = 0.75
 _NUDGE_GROWTH    = 1.6
-_NUDGE_TOL       = 0.80   # |correction| (+/-5 full scale) close enough to hand over
+# _NUDGE_TOL is gone with the centre-by-rotation loop it served: align no longer decides when a
+# tube is "centred enough", it decides whether the tube is OURS and then hands over. Deciding
+# centredness here is what declared success at "off +2 px" on a frame whose tube ran nearly
+# horizontal, and then handed the follow loop a robot at the wrong heading.
 _NUDGE_MAX       = 6
+
+
+def _align_look(bus):
+    """Sample _ALIGN_FRAMES fresh frames and return a tube only if enough of them AGREE.
+
+    Returns (tube, frame, n_agree). `tube` is the median-x reading of the agreeing group, or None.
+
+    Pure gates cannot do this job: lat2_align2 passed _tube_plausible (w=46, s=3.4) on a frame of
+    bare soil. What separates a real tube from a strong soil artefact is that the real one is STILL
+    THERE on the next frame, in the same place. This is the same reasoning as _track_tube's relock
+    requiring its pending rejects to agree.
+    """
+    seen = []
+    last_frame = None
+    for _ in range(_ALIGN_FRAMES):
+        ok, frame = _fresh_frame(bus)
+        if not ok:
+            continue
+        last_frame = frame
+        t = detect_tube(frame)
+        if _tube_plausible(t):
+            seen.append((t["tube_x"], t, frame))
+    if len(seen) < _ALIGN_AGREE:
+        return None, last_frame, len(seen)
+    # largest cluster of readings within _ALIGN_AGREE_PX of each other
+    best = []
+    for x0, _t, _f in seen:
+        grp = [s for s in seen if abs(s[0] - x0) <= _ALIGN_AGREE_PX]
+        if len(grp) > len(best):
+            best = grp
+    if len(best) < _ALIGN_AGREE:
+        return None, last_frame, len(best)
+    best.sort(key=lambda s: s[0])
+    mid = best[len(best) // 2]
+    return mid[1], mid[2], len(best)
 
 
 def _nudge(turn_right, pulse):
@@ -2280,71 +2345,140 @@ def _arrive_over_lateral(bus):
     return best
 
 
+def _align_look(grab, frames=None, agree=None, agree_px=None):
+    """Sample several fresh frames and return a tube only if enough of them AGREE on its column.
+
+    `grab` is a zero-arg callable returning (ok, frame) — injected so this is testable without a
+    board. Returns (tube, frame, n_agree); `tube` is the median-column reading of the largest
+    agreeing group, or None.
+
+    WHY AGREEMENT AND NOT A BETTER GATE. lat2_align2 (a saved frame from the 2026-08-19 turn) is
+    bare soil and straw with no tube in it at all, and detect_tube reported a tube at x=97 with
+    strength 3.4 — passing every shape gate there is. What separates it from a real tube is that it
+    is NOT THERE on the neighbouring frames: align1 and align3 both find nothing. Measured over that
+    saved sequence, the false positive is isolated and two-of-three agreement removes it.
+    Same reasoning as _track_tube's relock requiring its pending rejects to agree.
+    """
+    frames = _ALIGN_FRAMES if frames is None else frames
+    agree = _ALIGN_AGREE if agree is None else agree
+    agree_px = _ALIGN_AGREE_PX if agree_px is None else agree_px
+
+    seen, last_frame = [], None
+    for _ in range(frames):
+        ok, frame = grab()
+        if not ok or frame is None:
+            continue
+        last_frame = frame
+        t = detect_tube(frame)
+        if _tube_plausible(t):
+            seen.append((float(t["tube_x"]), t, frame))
+    if len(seen) < agree:
+        return None, last_frame, len(seen)
+    best = []
+    for x0, _t, _f in seen:
+        grp = [g for g in seen if abs(g[0] - x0) <= agree_px]
+        if len(grp) > len(best):
+            best = grp
+    if len(best) < agree:
+        return None, last_frame, len(best)
+    best.sort(key=lambda g: g[0])
+    mid = best[len(best) // 2]
+    return mid[1], mid[2], len(best)
+
+
+def _align_is_ours(tube, frame_w):
+    """Is this the lateral we pivoted ON, or the one we came from?
+
+    We drove until the crossing was under the pivot axis and then turned about that axis, so the
+    target tube MUST be near the middle of the frame. Anything far off-centre is a different tube.
+    That distinction cannot be made from confidence or shape — on 2026-08-19 the robot locked onto
+    the PREVIOUS lateral during the turn and drove back down the row it had just finished. The old
+    lateral is a real, perfectly tube-shaped tube; the only thing wrong with it is WHERE it is.
+
+    Measured for the current geometry: at a 0.50m row gap the previous lateral sits about 279px from
+    centre, against a 160px half-frame — just outside the view, and it sweeps through on any
+    sideways slip. _ALIGN_CENTRE_PX = 70 (about 12.5cm of ground) is comfortably wider than a
+    plausible landing error and far narrower than that 279px, so the two never overlap.
+    """
+    return abs(float(tube["tube_x"]) - frame_w / 2.0) <= _ALIGN_CENTRE_PX
+
+
 def _turn_onto_tube(bus, turn_right, tag):
-    """Pivot onto the lateral, then centre the tube in frame before driving off.
+    """Pivot onto the lateral, then hand to the follow loop as soon as the tube is identified.
 
-    Still needed after the gyro: a geometrically perfect 90 deg turn does not put the robot
-    ON the tube, because the lateral need not be square to the path we crossed on. The
-    gyro fixes the HEADING CHANGE; only the camera can say where the tube actually is. What
-    changed is the division of labour — vision now trims a good turn instead of rescuing a
-    bad one.
+    REWRITTEN 2026-08-19. The previous version rotated in place to "centre" the tube, and that was
+    wrong in three separate ways, all of which the field showed:
 
-    Every frame the decision is taken on is saved as <tag>_alignN.jpg, and the numbers
-    are logged beside the filename, so a bad landing can be checked against the picture
-    that caused it instead of inferred from the steering flailing seconds later.
+    1. IT COULD SPIN THE ROBOT MORE THAN A FULL TURN. The nudges escalated 0.30 -> 0.48 -> 0.75s and
+       nothing bounded their sum: seven iterations is 4.53s of motor-on, which at the measured 60-83
+       dps is 272-376 degrees. The 02:33 run spent 137 degrees this way and finished with the
+       lateral running nearly horizontal in frame. The commanded pivot had landed at err -0.0 deg —
+       the SEARCH threw the heading away, not the turn.
+
+    2. IT ASSUMED "no tube visible" MEANT "under-turned" and always nudged the same way. After a
+       pivot that skidded sideways on the plastic tube the cause is lateral displacement, and
+       rotating further makes it worse.
+
+    3. CENTRING BY ROTATION IS THE WRONG TOOL. A robot 10cm to the side but perfectly parallel gets
+       rotated until the tube looks centred, which leaves it at an angle to the row: centred for one
+       frame, then off the row. The follow loop corrects cross-track offset WHILE DRIVING, using the
+       near and far corrections together, and does it better than pivoting in place can.
+
+    So: search only while nothing is visible, bounded hard; identify the tube by POSITION so the
+    neighbouring lateral cannot be mistaken for it; then hand over and drive. Returns True if a
+    trusted tube was found.
     """
     _pivot(_TURN_ON_COARSE, turn_right)
-    last = None                            # last accepted correction
-    last_x = None                          # last tube_x seen, to detect "nothing moved"
+    spent_deg = 0.0
+    probe_right = turn_right
     pulse = _NUDGE_PULSE_S
     for i in range(_NUDGE_MAX + 1):
-        ok, frame = _fresh_frame(bus)
-        if not ok:
+        t, frame, n_agree = _align_look(lambda: _fresh_frame(bus))
+        if frame is None:
             log("  align: no frame after the turn — leaving it open-loop")
-            return
-        t = detect_tube(frame)
-        plausible = _tube_plausible(t)
+            return False
         name = _save_named(frame, "%s_align%d" % (tag, i))
+        w = frame.shape[1]
 
-        if not plausible:
-            if i >= _NUDGE_MAX:
-                break
-            log("  align %d: no tube-shaped vertical yet (found=%s w=%s s=%.1f) — "
-                "nudging %s %.2fs [%s]"
-                % (i, t["found"], t["width"], t["strength"],
-                   "right" if turn_right else "left", pulse, name))
-            _nudge(turn_right, pulse)      # under-turned: keep coming round
-            pulse = min(_NUDGE_PULSE_MAX, pulse * _NUDGE_GROWTH)
-            last, last_x = None, None
-            continue
+        if t is not None and _align_is_ours(t, w):
+            # DON'T LEAVE THE FOUND TUBE. Seed the tracker so the follow loop starts HINTED on this
+            # column instead of cold: its jump gate (~30px) then keeps it here rather than letting
+            # it wander onto the neighbouring lateral, which is exactly what happened before.
+            _track["x"] = float(t["tube_x"])
+            _track["last_ok"] = time.time()
+            _track["rejects"], _track["pending"] = 0, []
+            log("  align %d: tube at x=%.0f (%+.0fpx off centre), %d/%d frames agreed, %s — "
+                "handing to the follow loop with the tracker seeded [%s]"
+                % (i, t["tube_x"], t["tube_x"] - w / 2.0, n_agree, _ALIGN_FRAMES,
+                   _tilt_str(t), name))
+            return True
 
-        c = t["correction"]
-        log("  align %d: tube x=%.0f, off %+.0f px, correction %+.2f, w=%s s=%.1f, %s [%s]"
-            % (i, t["tube_x"], t["offset_px"], c, t["width"], t["strength"],
-               _tilt_str(t), name))
-        if abs(c) <= _NUDGE_TOL:
-            log("  align: centred after %d nudge(s) — following" % i)
-            return
-        if last_x is not None and abs(t["tube_x"] - last_x) < 3.0:
-            # The view did not change: that pulse moved nothing. Lengthen it and retry
-            # rather than concluding there is no gain to be had — the old code read this
-            # as "no further gain" and handed over a robot that had not turned at all.
-            pulse = min(_NUDGE_PULSE_MAX, pulse * _NUDGE_GROWTH)
-            log("  align: nothing moved — lengthening the nudge to %.2fs" % pulse)
-        elif last is not None and (c * last < 0 or abs(c) >= abs(last) - 0.05):
-            # It DID move, and moved past centre or not usefully. Stop: the follow loop
-            # steers continuously while driving and does this better than pivoting in
-            # place can. Hunting here would just burn the tube out of view.
-            log("  align: no further gain (was %+.2f, now %+.2f) — handing to the "
-                "follow loop" % (last, c))
-            return
-        if i >= _NUDGE_MAX:
-            break
-        _nudge(c > 0, pulse)               # + correction = tube is RIGHT -> turn right
-        last, last_x = c, t["tube_x"]
-    log("  align: not centred after %d nudges — the follow loop takes it from here"
-        % _NUDGE_MAX)
+        if t is not None:
+            # A real, tube-shaped reading in the wrong place. Almost certainly the lateral we came
+            # from. Say so explicitly, because "found a tube" and "found OUR tube" reading the same
+            # in the log is what hid this for days.
+            log("  align %d: IGNORING tube at x=%.0f (%+.0fpx off centre, limit %.0f) — too far "
+                "off to be the one we pivoted on; the previous lateral sits about 279px out [%s]"
+                % (i, t["tube_x"], t["tube_x"] - w / 2.0, _ALIGN_CENTRE_PX, name))
 
+        if spent_deg >= _NUDGE_MAX_TOTAL_DEG or i >= _NUDGE_MAX:
+            _drive_stop("drip")
+            log("  align: NO tube of ours after %d looks and %.0f deg of search — STOPPING rather "
+                "than driving off at an unknown heading. The gyro closes the pivot angle, so this "
+                "is lateral displacement: nudge the robot onto the lateral by hand and the follow "
+                "loop will pick it up. [%s]" % (i + 1, spent_deg, name))
+            return False
+
+        step = min(pulse, max(0.05, (_NUDGE_MAX_TOTAL_DEG - spent_deg) / max(1.0, CAL["tdps"])))
+        log("  align %d: nothing of ours (%d/%d frames agreed) — probing %s %.2fs, %.0f of %.0f "
+            "deg spent [%s]"
+            % (i, n_agree, _ALIGN_FRAMES, "right" if probe_right else "left", step,
+               spent_deg, _NUDGE_MAX_TOTAL_DEG, name))
+        _nudge(probe_right, step)
+        spent_deg += step * CAL["tdps"]
+        probe_right = not probe_right       # ALTERNATE: covers over-turn and sideways slip too
+        pulse = min(_NUDGE_PULSE_MAX, pulse * _NUDGE_GROWTH)
+    return False
 
 def _emit_capture_status():
     ui.send_message("capture_status", {
