@@ -14,7 +14,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 # The geometry is pure arithmetic, so mirror the constants rather than importing main.py
 # (which needs the Arduino bridge). If these drift from main.py the test is worthless, so
 # the numbers are asserted against the source below.
-NEAR, FAR = 0.39, 0.61
+# FAR CORRECTED 2026-08-19: was 0.61, which was a C310 number — its comment in main.py recorded
+# "bottom of frame -> top of frame 22 cm", the old camera's strip. The QHM-999RL sees 43 cm, so
+# punch -> far edge is 0.39 + 0.43 = 0.82. The error only mattered once the retrained model started
+# detecting away from the very bottom of frame, where the two values agree: it under-estimated the
+# distance by 7 cm at y=162, 10 cm at mid-frame and 18 cm at y=30.
+NEAR, FAR = 0.39, 0.82
 
 
 def ground_m(y_frac):
@@ -46,9 +51,17 @@ def test_creep_is_bounded_by_the_measured_frame_edges():
         assert NEAR <= ground_m(yf) <= FAR, "a mapped distance outside the measured strip"
 
 
-def test_reach_line_gives_a_sane_creep():
-    """_EMIT_MIN_Y_FRAC = 0.55 is the trigger, so this is the creep the robot will usually
-    perform. At the measured 0.170 m/s it must be a couple of seconds, not a lunge."""
+def test_reach_line_distance_is_within_the_visible_strip():
+    """_EMIT_MIN_Y_FRAC = 0.55 is where an observation becomes trustworthy enough to queue, so this
+    is the distance the robot typically commits from.
+
+    REWRITTEN 2026-08-19. It used to assert 0.40 < d < 0.55 and "2-4 seconds of creep", both of which
+    are dead: the creep is gone (the conveyor drives the distance WHILE WATCHING instead of blind —
+    see _emit_queue in main.py), and with FAR corrected from the C310's 0.61 to 0.82 the distance at
+    this line is 0.583 m rather than 0.50 m. What remains true, and worth pinning, is that it lies
+    inside the visible strip and is comfortably past the punch.
+    """
     d = ground_m(0.55)
-    assert 0.40 < d < 0.55
-    assert 2.0 < d / 0.170 < 4.0
+    assert NEAR < d < FAR, "%.3f is outside the visible strip %.2f-%.2f" % (d, NEAR, FAR)
+    assert d > NEAR + 0.10, ("committing only %.0f mm past the punch leaves no room for the "
+                             "conveyor to refine the estimate" % ((d - NEAR) * 1000))

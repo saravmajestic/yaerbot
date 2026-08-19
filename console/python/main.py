@@ -488,9 +488,54 @@ _ARM_DWELL_S  = 0.6
 _PLANT_SIM_S  = 2.0      # let the spool servo reach the angle before dropping
 _MIN_REPLANT_M = 0.08    # absolute floor; see _min_replant() for the run-time value
 
+# HOW CLOSE TWO DETECTIONS MUST BE TO COUNT AS THE SAME EMITTER.
+#
+# THE FAULT THIS FIXES, measured on the 07:18 run of 2026-08-19. The retrained model detected an
+# emitter on 96 of 96 frames in one window — recall is no longer the problem — yet only 7 stops
+# happened over a row holding about 13 emitter positions. Every other one, and the reason is
+# geometric rather than a detection failure:
+#
+#     punch tip sits 0.39 m behind the NEAREST visible ground
+#     emitters are         0.40 m apart
+#
+# "See an emitter, then creep it under the punch" therefore consumes AT LEAST one whole spacing
+# while the camera is not being consulted. The logged creeps were 0.45, 0.46, 0.51, 0.46, 0.47,
+# 0.47, 0.43 m — every one longer than the spacing — and the gaps between stops came out at 1.6x
+# to 2.8x the spacing. The next emitter was already under or behind the robot by the time it looked
+# again.
+#
+# CAPPING THE CREEP WAS THE OBVIOUS FIX AND IT IS NOT GOOD ENOUGH. Requirement is +/-5 cm placement,
+# and the punch is 0.39 m behind the nearest visible ground, so any creep short of that leaves the
+# seed short by the difference — capping at 0.25 m would miss by 14 cm.
+#
+# So the robot must cover the full distance, and the ONLY way to do that without driving past the
+# next emitter is to keep watching while it drives. That is the conveyor below: every detection is
+# converted to a TARGET DISTANCE, targets are queued, and the punch fires when the robot reaches
+# each one. Several emitters are in flight at once, which is exactly the situation a 0.40 m spacing
+# and a 0.39 m punch offset forces.
+#
+# WHY TARGETS DEDUPLICATE THEMSELVES, which is what makes the count right: an emitter seen at
+# distance `gap` when the robot is at `travelled` has target `travelled + gap`. Seen again a frame
+# later, `travelled` has grown by the same amount `gap` has shrunk — so the SAME physical emitter
+# yields the SAME target every time it is observed, whatever row it is in. Two detections belong to
+# one emitter when their targets agree.
+#
+# 0.15 m: comfortably wider than the jitter in that estimate (interpolation error plus a frame or two
+# of travel) and comfortably narrower than the 0.40 m spacing, so two real emitters can never merge.
+_EMIT_DEDUPE_M = 0.15
+# Refuse to fire twice within this, whatever the queue says. Belt-and-braces only; the dedupe above
+# is the real mechanism.
+_EMIT_MIN_GAP_M = 0.12
+
 
 def _min_replant():
     """Distance that must pass before the NEXT emitter can be planted.
+
+    A SAFETY FLOOR ONLY. Deduplication is done by target distance in _emit_queue (see there); this
+    just refuses two punches absurdly close together. The `armed` edge-detect that used to do the
+    debouncing is gone: it keyed off whether an emitter was still VISIBLE, and with the camera's view
+    (0.43 m) wider than the emitter spacing (0.40 m) there is essentially always one in frame, so it
+    never re-armed and a 5 m lateral planted once.
 
     Still not a trigger — the model decides where emitters are, and a missed one just
     means the next is found normally. This only stops ONE emitter being counted twice,
@@ -500,7 +545,7 @@ def _min_replant():
     any real gap and comfortably above that.
     """
     gap = float(_drip.get("emitter_gap") or 0.0)
-    return max(_MIN_REPLANT_M, 0.5 * gap)
+    return max(_MIN_REPLANT_M, min(_EMIT_MIN_GAP_M, 0.5 * gap) if gap else _EMIT_MIN_GAP_M)
 
 
 def _traverse_track(hist, traversed, cross):
@@ -669,16 +714,21 @@ _EMIT_CONF, _EMIT_COOLDOWN = 0.60, 3.0
 _EMIT_MIN_Y_FRAC = 0.55
 
 
-# WHERE THE PUNCH IS, RELATIVE TO WHAT THE CAMERA CAN SEE. Measured 2026-08-18:
+# WHERE THE PUNCH IS, RELATIVE TO WHAT THE CAMERA CAN SEE:
 #     punch tip -> front wheel centre    16 cm   (seeder is centre-mounted; tip sits 3cm
 #                                                 behind the pivot axis)
-#     front wheel -> bottom of frame     23 cm
-#     bottom of frame -> top of frame    22 cm
-# So the visible strip is 39-61 cm AHEAD OF THE PUNCH. An emitter under the tip is invisible:
-# it left the frame 39 cm ago. Stopping the instant one is "in reach" therefore plants ~30 cm
-# short of every emitter — which is what the emitter logic did before this.
+#     front wheel -> bottom of frame     23 cm   (operator measured 24 cm on the new camera)
+#     bottom of frame -> top of frame    43 cm   <- CORRECTED 2026-08-19
+# So the visible strip is 39-82 cm AHEAD OF THE PUNCH. An emitter under the tip is invisible:
+# it left the frame 39 cm ago.
+#
+# THE FAR EDGE WAS 0.61 AND THAT WAS A C310 NUMBER. Its comment recorded "bottom of frame -> top
+# of frame 22 cm", the old camera's strip; the QHM-999RL sees 43 cm, so the far edge is
+# 0.39 + 0.43 = 0.82. The error only mattered once the retrained model started detecting away from
+# the very bottom, where the two agree — at which point it under-estimated the creep by 7 cm at
+# y=162, 10 cm at mid-frame and 18 cm at y=30, all of which the model now reaches.
 _PUNCH_TO_FRAME_NEAR_M = 0.39
-_PUNCH_TO_FRAME_FAR_M  = 0.61
+_PUNCH_TO_FRAME_FAR_M  = 0.82
 
 
 def _emitter_ground_m(emit, h):
@@ -756,22 +806,53 @@ def _emit_tally_line(h):
                if t["detected"] and not t["conf_ok"] else ""))
 
 
-def _emit_debounce(detected, armed, travelled, last_plant_at):
-    """Decide whether THIS frame plants, and what `armed` becomes. Pure, so it is testable.
+def _emit_queue(targets, travelled, gap, dedupe_m=None):
+    """Fold one emitter observation into the pending-target list. Pure, so it is testable.
 
-    Extracted 2026-08-19 because the re-arm condition was wrong for eight days and no test could
-    reach it: the decision lived inline in the camera loop, which needs a board and a run that
-    gets as far as the drip branch. The bug (re-arming on frame-exit while the camera's 0.43m view
-    is wider than the 0.40m emitter spacing, so it never re-armed) produced exactly one emitter per
-    lateral and was only visible in a field log.
+    `gap` is metres from the punch tip to the emitter right now (from _emitter_ground_m). The target
+    is therefore `travelled + gap`: the odometer reading at which that emitter will be under the
+    punch.
 
-    Returns (plant_now, armed_next). The caller keeps its own tube-found check ahead of acting on
-    plant_now — stopping when the tube is lost takes priority over planting.
+    THE SELF-DEDUPLICATION THAT MAKES THE COUNT RIGHT. As the robot advances, `travelled` grows by
+    exactly as much as `gap` shrinks, so one physical emitter produces the SAME target on every frame
+    it is seen in, whatever row it occupies. Observations agreeing within `dedupe_m` are therefore
+    one emitter, and the estimate is REFINED toward the newest observation — the emitter is nearer
+    then, so both the y-to-distance interpolation error and the remaining travel are smaller.
+
+    This replaced a visibility-edge debounce that could not work: with the camera's 0.43 m view wider
+    than the 0.40 m emitter spacing there is nearly always an emitter in frame, so "wait until none
+    is visible" never came true. It is also why a capped creep was not enough — +/-5 cm placement
+    needs the robot to cover the full 0.39 m punch offset, and it can only do that without driving
+    past the next emitter by keeping several targets in flight.
+
+    Returns a new sorted list.
     """
-    if not detected:
-        armed = True
-    plant = bool(detected and armed and (travelled - last_plant_at) >= _min_replant())
-    return plant, armed
+    dedupe_m = _EMIT_DEDUPE_M if dedupe_m is None else dedupe_m
+    t = travelled + gap
+    out = list(targets)
+    for i, existing in enumerate(out):
+        if abs(existing - t) <= dedupe_m:
+            # same emitter, seen again and now nearer: trust the newer estimate more
+            out[i] = 0.35 * existing + 0.65 * t
+            return sorted(out)
+    out.append(t)
+    return sorted(out)
+
+
+def _emit_due(targets, travelled, last_plant_at):
+    """The head of the queue, if the robot has reached it. Pure.
+
+    Returns (target, rest) or (None, targets). The _min_replant() floor is a safety net against two
+    punches on top of each other; the dedupe in _emit_queue is what actually separates emitters.
+    """
+    if not targets:
+        return None, targets
+    head = targets[0]
+    if travelled + 1e-9 < head:
+        return None, targets
+    if travelled - last_plant_at < _min_replant():
+        return None, targets
+    return head, targets[1:]
 
 
 def _emitter_in_reach(emit, h):
@@ -1350,6 +1431,7 @@ def _cam_loop_run(url, held):
     odo = FlowOdometer()
     travelled = 0.0             # estimated distance along the lateral this run
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
+    emit_targets = []           # conveyor: odometer readings at which an emitter reaches the punch
     armed = True                # detection-edge debounce (see the drip branch)
     driving_since = None        # when the current drive segment began
     tube_seen = None            # last tube["found"], for EDGE logging (None = no edge yet)
@@ -1572,6 +1654,7 @@ def _cam_loop_run(url, held):
             _track_reset()
             _tube_grace_reset()
             last_plant_at, armed, driving_since = -1e9, True, None
+            emit_targets = []
         prev_run_state = _run["state"]
 
         # Tube found/lost EDGE logging. Logging every frame would flood at frame rate,
@@ -1758,6 +1841,7 @@ def _cam_loop_run(url, held):
                 travelled = 0.0
                 last_plant_at = -1e9                  # first emitter of a row is never gated
                 armed = True
+                emit_targets = []                     # a new lateral starts with an empty conveyor
                 driving_since = None
                 _emit_run()
             elif traversed >= _traverse_max():
@@ -1805,7 +1889,18 @@ def _cam_loop_run(url, held):
             # only ever moves forward, so an emitter that has dropped out of the bottom of the
             # reach zone cannot come back into it.
             _emit_tally_add(emit, in_view, detected, h)
-            plant_ok, armed = _emit_debounce(detected, armed, travelled, last_plant_at)
+
+            # THE CONVEYOR. Every confident observation becomes a target distance and joins the
+            # queue; the punch fires when the robot reaches each one. `detected` (the reach-zone
+            # test) is no longer the trigger — it only decides which observations are trustworthy
+            # enough to queue, because a detection near the bottom of frame has the least
+            # y-to-distance interpolation error and the shortest remaining travel.
+            if detected:
+                _gap_now = _emitter_ground_m(emit, h)
+                if _gap_now and _gap_now > 0.0:
+                    emit_targets = _emit_queue(emit_targets, travelled, _gap_now)
+            _due, _rest = _emit_due(emit_targets, travelled, last_plant_at)
+            plant_ok = _due is not None
 
             if not tube["found"]:
                 # NO TUBE IN VIEW -> STOP, whatever else is happening this frame.
@@ -1840,45 +1935,23 @@ def _cam_loop_run(url, held):
                 # it? A confidence number in a log line cannot answer either.
                 shot = _save_named(frame, "emit%d_lat%d" % (_run["planted"] + 1, lateral + 1))
 
-                # CREEP THE EMITTER UNDER THE PUNCH before planting. The seeder is 39cm
-                # behind the nearest ground the camera can see, so at the moment of
-                # detection the emitter is always ahead of the tip and planting here would
-                # drop the seed ~30-40cm short. Open-loop by necessity: once the robot moves
-                # forward the emitter leaves the frame entirely, so there is nothing left to
-                # close the loop on. It is only viable because the creep speed is measured
-                # (0.170 m/s at PWM 55) and the distance is short.
-                # RE-CONFIRM ON A FRESH FRAME IF THE BOX IS STALE. The creep distance comes
-                # from the detection's ROW, so acting on an old box places the seed wherever the
-                # emitter was when that frame was CAPTURED. The worker publishes that capture
-                # time, so the staleness below is measured in metres of real travel rather than
-                # assumed — which is what lets this fire only when it actually matters. The
-                # robot is stopped by now, so the extra inference costs nothing it needs, and it
-                # FALLS BACK to the existing box if the fresh look finds nothing: strictly
-                # better placement, never a skipped emitter.
-                emit_for_creep = emit
-                stale_m = (now - emit_t) * _DRIP_SPEED_MPS if emit_t else 0.0
-                if stale_m > g["emit_stale_m"]:
-                    ok_f, fresh = _fresh_frame(bus, budget_s=0.6)
-                    if ok_f:
-                        moist2 = _moisture_min()
-                        e2 = (detect_emitter_ml(fresh, moisture=moist2)
-                              if ml_available() else detect_emitter(fresh, moisture=moist2))
-                        if e2 and e2.get("detected") and e2.get("position"):
-                            log("  emitter %d — box was %.0fmm stale, re-confirmed on a "
-                                "fresh frame (y %s -> %s)"
-                                % (_run["planted"] + 1, stale_m * 1000,
-                                   (emit.get("position") or (0, 0))[1], e2["position"][1]))
-                            emit_for_creep = e2
-                        else:
-                            log("  emitter %d — box was %.0fmm stale and the fresh frame "
-                                "found nothing; creeping on the cached box"
-                                % (_run["planted"] + 1, stale_m * 1000))
-                gap = _emitter_ground_m(emit_for_creep, h)
-                if gap and gap > 0.02:
-                    log("  emitter %d — creeping %.2fm to bring it under the punch"
-                        % (_run["planted"] + 1, gap))
-                    _creep(gap)
-                    travelled += gap
+                # NO CREEP. The conveyor already drove the emitter to the punch: this branch only
+                # fires when `travelled` reaches the target that was computed when the emitter was
+                # seen, so the distance has been covered WHILE STILL WATCHING rather than blind.
+                #
+                # What was here before: stop the moment an emitter entered the reach zone, then
+                # blind-creep _emitter_ground_m() metres to bring it under the tip. The creeps came
+                # out at 0.43-0.51 m against a 0.40 m emitter spacing, so every stop drove past the
+                # next emitter with the camera unconsulted — 7 stops over a row holding 13 emitter
+                # positions on the 07:18 run of 2026-08-19. Capping the creep would fix the count and
+                # break the placement (short by up to 14 cm against a +/-5 cm requirement), which is
+                # why the trigger moved instead of the distance.
+                emit_targets = _rest
+                _err_m = travelled - _due          # how far past the target we actually stopped
+                log("  emitter %d — punch reached (target %.2fm, stopped at %.2fm, %+.0fmm), "
+                    "%d more queued"
+                    % (_run["planted"] + 1, _due, travelled, _err_m * 1000, len(emit_targets)))
+
                 # One stop, then plant at EVERY selected arm position: [0, 90] gives
                 # a 4-seed cross (0/180 then 90/270).
                 for a in _drip["angles"]:
