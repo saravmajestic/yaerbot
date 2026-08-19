@@ -29,6 +29,7 @@ Three conventions, each of which fixed a class of unreadable output:
 PIN SOURCE OF TRUTH: firmware/farm_os/farm_os.ino. Change a pin there, change it here.
 """
 import os
+import re
 
 import schemdraw
 import schemdraw.elements as elm
@@ -300,11 +301,37 @@ def sheet_gyro():
         d += elm.Ground().at((gy.GND[0], gy.GND[1] - 1.4)).color(GND)
 
 
+def build_standalone():
+    """Inline the four SVGs into index.html and write index.standalone.html.
+
+    index.html references the sheets with <img src="power.svg">, which is right for the repo --
+    the SVGs stay separately usable in a slide or the README. But a published artifact is a single
+    file behind a strict CSP, so those relative sources never load. This produces the portable
+    twin; publish that one.
+    """
+    src = os.path.join(OUT, "index.html")
+    if not os.path.exists(src):
+        return
+    html = open(src, encoding="utf-8").read()
+    for name in ("power", "drive", "seeder", "gyro"):
+        svg = open(os.path.join(OUT, name + ".svg"), encoding="utf-8").read()
+        # keep it responsive once inline: drop the fixed pt width/height, keep the viewBox
+        svg = re.sub(r'\s(?:width|height)="[^"]*"', "", svg, count=2)
+        svg = svg.replace("<svg", '<svg class="sheet" preserveAspectRatio="xMidYMid meet"', 1)
+        html = re.sub(r'<img src="%s\.svg"[^>]*>' % name, lambda _m: svg, html, count=1)
+    html = html.replace("</style>",
+                        "  .sheet{display:block;width:100%;height:auto;min-width:640px}\n</style>")
+    out = os.path.join(OUT, "index.standalone.html")
+    open(out, "w", encoding="utf-8").write(html)
+    print("wrote index.standalone.html (%.0f KB)" % (len(html) / 1024))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     for fn in (sheet_power, sheet_drive, sheet_seeder, sheet_gyro):
         fn()
         print("wrote", fn.__name__)
+    build_standalone()
     print("-> %s" % OUT)
 
 
