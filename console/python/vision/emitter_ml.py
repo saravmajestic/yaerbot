@@ -174,6 +174,18 @@ def detect_emitter_ml(frame, moisture=None, moisture_wet_below=9000, conf_min=0.
     result.update(visual=True, detected=True,
                   position=(best["cx"], best["cy"]),
                   ml_value=round(float(best["value"]), 3))
+    # EVERY BOX, NOT JUST THE BEST ONE. Returning only max(value) silently discarded emitters, and
+    # once the retrained model became good that started costing real stops: with several emitters in
+    # frame at once, whenever the FARTHER one scored higher the nearer one — the one actually in the
+    # reach zone — was never reported. The 07:50 run has windows with 95 of 96 frames detecting and
+    # ZERO of them "low enough to act on", which is that and nothing else.
+    #
+    # `position`/`confidence` still describe the best box, so every existing caller is unchanged.
+    # The conveyor in main.py consumes `boxes` instead, because it is built to hold several emitters
+    # in flight and simply needed to be told they were there.
+    result["boxes"] = [{"position": (b["cx"], b["cy"]),
+                        "confidence": round(min(1.0, float(b["value"])), 3)}
+                       for b in sorted(boxes, key=lambda b: -b["cy"])]   # nearest (lowest) first
     # Confidence: the model's own value, plus a moisture confirmation ONLY when a probe is
     # actually fitted. The 0.6 scaling that used to sit here made the number impossible to
     # reason about — it capped ML-only confidence at 0.6 against a 0.55 threshold, so the

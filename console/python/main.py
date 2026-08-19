@@ -488,51 +488,156 @@ _ARM_DWELL_S  = 0.6
 _PLANT_SIM_S  = 2.0      # let the spool servo reach the angle before dropping
 _MIN_REPLANT_M = 0.08    # absolute floor; see _min_replant() for the run-time value
 
-# HOW CLOSE TWO DETECTIONS MUST BE TO COUNT AS THE SAME EMITTER.
+# THE WHOLE EMITTER ALGORITHM, and it is the operator's design: watch a LINE near the bottom of the
+# frame, and commit an emitter the moment something crosses below it. Drive the measured distance to
+# the punch. Repeat. At most two emitters pending at once.
 #
-# THE FAULT THIS FIXES, measured on the 07:18 run of 2026-08-19. The retrained model detected an
-# emitter on 96 of 96 frames in one window — recall is no longer the problem — yet only 7 stops
-# happened over a row holding about 13 emitter positions. Every other one, and the reason is
-# geometric rather than a detection failure:
+# WHY THREE EARLIER ATTEMPTS FAILED, all in the same place. The punch sits 0.39 m BEHIND the nearest
+# ground the camera can see, so at the moment of acting the emitter is invisible and has been for
+# 0.39 m. That forces memory and odometry — and then IDENTITY, because one emitter is seen on ~10
+# frames and must be punched once, so something must decide "is this the same emitter as that one?"
+# A per-frame detector has no opinion on that, and every bug was an identity error:
 #
-#     punch tip sits 0.39 m behind the NEAREST visible ground
-#     emitters are         0.40 m apart
+#     re-arm on visibility       -> "is it gone?" never true; view (0.43 m) wider than spacing (0.40 m)
+#     blind creep to the punch    -> consumed a whole spacing unseen, planted every other emitter
+#     best-confidence box         -> reported the FAR emitter, hid the near one in the reach zone
+#     target dedupe + refinement  -> refinement dragged two targets inside the dedupe distance, and
+#                                    nothing re-checked them: the 08:04 run punched 0.97 m and 0.98 m
 #
-# "See an emitter, then creep it under the punch" therefore consumes AT LEAST one whole spacing
-# while the camera is not being consulted. The logged creeps were 0.45, 0.46, 0.51, 0.46, 0.47,
-# 0.47, 0.43 m — every one longer than the spacing — and the gaps between stops came out at 1.6x
-# to 2.8x the spacing. The next emitter was already under or behind the robot by the time it looked
-# again.
+# NOT ONE was a detection failure. The model has been right since the retrain — it says "emitter"
+# reliably on ~100% of frames. What it cannot say is WHICH emitter, and this design never asks.
 #
-# CAPPING THE CREEP WAS THE OBVIOUS FIX AND IT IS NOT GOOD ENOUGH. Requirement is +/-5 cm placement,
-# and the punch is 0.39 m behind the nearest visible ground, so any creep short of that leaves the
-# seed short by the difference — capping at 0.25 m would miss by 14 cm.
+# A RISING EDGE IS THE IDENTITY. "Is anything below the line" goes false->true exactly once per
+# emitter, because the line genuinely clears in between. At the demo's 0.40 m spacing:
+#     A occupies the line for travelled in [A-0.455, A-0.39]   -- 6.5 cm
+#     B arrives at A-0.055
+#     => the line is CLEAR for 33.5 cm between them
+# So there is no dedupe, no refinement and nothing to drift.
 #
-# So the robot must cover the full distance, and the ONLY way to do that without driving past the
-# next emitter is to keep watching while it drives. That is the conveyor below: every detection is
-# converted to a TARGET DISTANCE, targets are queued, and the punch fires when the robot reaches
-# each one. Several emitters are in flight at once, which is exactly the situation a 0.40 m spacing
-# and a 0.39 m punch offset forces.
+# WHY THE LINE IS NOT THE BOTTOM EDGE. Leaving the frame would be the crispest event, but when A is
+# punched B sits only 1 cm above the bottom edge — about two frames of observation, and one dropout
+# loses it below the frame for good. y >= 0.85 h puts the line at gap 0.455 m, giving 6.5 cm (~12
+# frames at 30 fps) of window.
 #
-# WHY TARGETS DEDUPLICATE THEMSELVES, which is what makes the count right: an emitter seen at
-# distance `gap` when the robot is at `travelled` has target `travelled + gap`. Seen again a frame
-# later, `travelled` has grown by the same amount `gap` has shrunk — so the SAME physical emitter
-# yields the SAME target every time it is observed, whatever row it is in. Two detections belong to
-# one emitter when their targets agree.
+# WHY TWO PENDING AND NOT ONE. B crosses the line 5.5 cm BEFORE A is punched, i.e. while A is still
+# pending. With capacity 1 that crossing is discarded and B can only be caught in the 1 cm between
+# A's punch and B leaving the frame — about two frames. Capacity 2 lets B commit on its own crossing,
+# with the full window. Three would never be used at any plausible spacing.
+_EMIT_MAX_PENDING = 2
+# How deep below the frame's near edge the commit band reaches, capped and also held under the
+# emitter spacing so only ONE emitter is ever inside it. 0.23 m is ~42 frames of observation at
+# 30 fps and 0.165 m/s.
+# NARROWED 0.23 -> 0.10 m, from the measured y-noise. The run of 08:44 committed 17 targets for 12
+# real emitters (measured with a tape: 12 at 40 cm), and the target gaps were 0.17-0.32 m — far too
+# close together to be different emitters. So one emitter was being committed repeatedly at DIFFERENT
+# estimated positions, which is the y-noise: the field log shows the reported row moving 150 -> 108
+# between two frames of the SAME emitter, and 42 px is 7.5 cm of ground.
 #
-# 0.15 m: comfortably wider than the jitter in that estimate (interpolation error plus a frame or two
-# of travel) and comfortably narrower than the 0.40 m spacing, so two real emitters can never merge.
-_EMIT_DEDUPE_M = 0.15
-# Refuse to fire twice within this, whatever the queue says. Belt-and-braces only; the dedupe above
-# is the real mechanism.
-_EMIT_MIN_GAP_M = 0.12
+#     apparent residence window  ~=  band depth + 2 x jitter
+#     with a 0.23 m band          =  0.23 + 0.15 = 0.38 m  -> exceeds the 0.28 lockout, so an
+#                                    emitter is still "in the band" when the lockout expires
+#     with a 0.10 m band          =  0.10 + 0.15 = 0.25 m  -> under a 0.30 m lockout
+#
+# A 0.10 m band still gives ~18 frames at 30 fps to see the emitter, and it sits at gap 0.39-0.49 —
+# nearest the camera, where the y-to-distance interpolation error is smallest.
+_EMIT_BAND_M = 0.10
+_EMIT_BAND_FRAC_OF_GAP = 0.25
+
+
+
+# AN EMITTER IS PART OF THE TUBE, SO IT MUST BE ON THE TUBE. This is the gate that matters, and it
+# was missing entirely.
+#
+# WHAT IT FIXES. Pointed at ordinary leaf litter with NO tube and NO emitter in frame at all, the
+# retrained model reported boxes at confidence 0.93, 0.65 and 0.52. Sampled over 60 frames of that
+# litter it produced 145 boxes. So "an emitter is in the band" was very nearly always true, and every
+# counting scheme built on it — four of them — degenerated into being paced by whatever lockout I had
+# set rather than by emitters. The 08:35 run's commits sat at 0.28-0.29 m, exactly my lockout.
+#
+# The earlier false-positive check passed 0 of 17 and gave false comfort: those negatives were bare
+# soil and crossing laterals. LEAF LITTER was in neither the training set nor the test set.
+#
+# WHY THIS FILTER IS CHEAP AND STRONG. The tube detector already tracks the tube's column, and an
+# emitter is a fitting ON that tube — it cannot be 20 cm off to the side in the litter. Measured on
+# the same 60 litter frames: of 145 boxes, 138 were on frames where no tube was found at all and are
+# rejected outright, and only 3 survived a +/-40 px window. That is ~98% of the false positives gone
+# for two comparisons per box.
+#
+# THE WINDOW IS DERIVED FROM THE TUBE'S OWN MEASURED WIDTH, not picked. A flat 30 px was 6x the
+# tube's half-width (fwhm 9-11 px on a 16 mm tube), i.e. it accepted anything within 5 cm of the
+# tube — which is not "on the tube" in any useful sense.
+#
+# half the measured fwhm, plus room for the outlet sticking out sideways and for detection jitter.
+_EMIT_ON_TUBE_MARGIN_PX = 12.0
+_EMIT_ON_TUBE_FALLBACK_PX = 18.0     # when the tube reports no usable width
+
+
+def _tube_x_at(tube, y, h):
+    """The tube's column AT ROW y, not at the bottom of frame.
+
+    THIS IS THE FIX THE OPERATOR ASKED FOR TWICE. Comparing an emitter box against x_near — the
+    tube's column at the BOTTOM of frame — is only right for a perfectly vertical tube. The detector
+    accepts tilts up to 35 degrees, and the tube's column shifts across the frame with tilt:
+
+        tilt  5 deg -> tube x differs by  21 px top to bottom
+        tilt 15 deg ->                    64 px
+        tilt 25 deg ->                   112 px
+
+    So on a 15 degree tube a REAL emitter at mid-frame sits 32 px away from x_near, and a ~17 px gate
+    would throw it away — while happily accepting litter on the other side of the tube. The detector
+    already reports both ends, so interpolate.
+    """
+    try:
+        far = float(tube.get("x_far"))
+        near = float(tube.get("x_near"))
+    except (TypeError, ValueError):
+        return None
+    if not h:
+        return near
+    f = max(0.0, min(1.0, float(y) / float(h)))     # 0 = top of frame, 1 = bottom
+    return far + f * (near - far)
+
+
+def _emit_on_tube_px(tube):
+    """How far off the tube column an emitter box may sit and still be on the tube."""
+    w = tube.get("width_fwhm") if tube else None
+    try:
+        w = float(w)
+    except (TypeError, ValueError):
+        w = None
+    if not w or w <= 0:
+        return _EMIT_ON_TUBE_FALLBACK_PX
+    return 0.5 * w + _EMIT_ON_TUBE_MARGIN_PX
+
+
+def _emit_lockout_m():
+    """Distance that must pass between two commits. THE ONLY THING SEPARATING EMITTERS.
+
+    Must exceed the band depth (0.55 x gap) so one emitter cannot commit twice, and stay under the
+    real spacing so the next emitter is not skipped. 0.70 x gap sits between them. Derived from the
+    CONFIGURED emitter_gap, which is therefore the setting that matters most for the count.
+    """
+    gap = float(_drip.get("emitter_gap") or 0.0)
+    # 0.75 x spacing: above the apparent residence window (band + 2 x jitter ~= 0.25 m at a 0.40 m
+    # spacing) so one emitter cannot commit twice, and below the spacing so the next is not skipped.
+    return max(0.15, 0.75 * gap) if gap else 0.30
+
+
+def _emit_band_m():
+    """Depth of the commit band, kept under the emitter spacing so one emitter occupies it at a time.
+
+    That single property is what makes a rising edge equal one emitter, which is what removes the
+    need to decide WHICH emitter a detection belongs to — the mistake behind every earlier attempt.
+    """
+    gap = float(_drip.get("emitter_gap") or 0.0)
+    return min(_EMIT_BAND_M, _EMIT_BAND_FRAC_OF_GAP * gap) if gap else _EMIT_BAND_M
 
 
 def _min_replant():
     """Distance that must pass before the NEXT emitter can be planted.
 
-    A SAFETY FLOOR ONLY. Deduplication is done by target distance in _emit_queue (see there); this
-    just refuses two punches absurdly close together. The `armed` edge-detect that used to do the
+    A SAFETY FLOOR ONLY, and with the commit-band design it should never bind: one emitter produces
+    one rising edge, so there is nothing to deduplicate. The `armed` edge-detect that used to do the
     debouncing is gone: it keyed off whether an emitter was still VISIBLE, and with the camera's view
     (0.43 m) wider than the emitter spacing (0.40 m) there is essentially always one in frame, so it
     never re-armed and a 5 m lateral planted once.
@@ -545,7 +650,7 @@ def _min_replant():
     any real gap and comfortably above that.
     """
     gap = float(_drip.get("emitter_gap") or 0.0)
-    return max(_MIN_REPLANT_M, min(_EMIT_MIN_GAP_M, 0.5 * gap) if gap else _EMIT_MIN_GAP_M)
+    return max(_MIN_REPLANT_M, 0.5 * gap) if gap else _MIN_REPLANT_M
 
 
 def _traverse_track(hist, traversed, cross):
@@ -761,12 +866,25 @@ def _emitter_ground_m(emit, h):
 # the model with conf_min=0.3, so sub-threshold boxes DO come back and can be counted — the
 # information existed and was simply thrown away every frame.
 _emit_tally = {"frames": 0, "detected": 0, "conf_ok": 0, "reach_ok": 0,
-               "best_conf": 0.0, "best_y": None, "best_frame": None}
+               "best_conf": 0.0, "best_y": None, "best_frame": None,
+               # how the ON-THE-TUBE filter is doing. This is the measurement that decides whether
+               # the emitter false positives are litter beside the tube or something on the tube
+               # itself, which is currently unknown.
+               "no_tube": 0, "off_tube": 0, "offsets": [],
+               # WHY a box did not become a stop. Every emitter debugging session so far has been
+               # blocked on exactly this: the log said how many boxes there were, never what happened
+               # to them. Each counter is one reason, so the dominant one names the fault.
+               "blk_conf": 0, "blk_band": 0, "blk_lockout": 0, "blk_full": 0,
+               "committed": 0, "commit_gaps": []}
 
 
 def _emit_tally_reset():
     _emit_tally.update(frames=0, detected=0, conf_ok=0, reach_ok=0,
-                       best_conf=0.0, best_y=None, best_frame=None)
+                       best_conf=0.0, best_y=None, best_frame=None,
+                       no_tube=0, off_tube=0, blk_conf=0, blk_band=0, blk_lockout=0,
+                       blk_full=0, committed=0)
+    _emit_tally["offsets"] = []
+    _emit_tally["commit_gaps"] = []
 
 
 def _emit_tally_add(emit, in_view, detected, h):
@@ -795,6 +913,19 @@ def _emit_tally_line(h):
         return ("  emitters: model returned NOTHING on %d frames (asked at conf>=0.3). "
                 "Either no emitter was in view, or the model cannot see them — check a saved "
                 "frame before retraining." % t["frames"])
+    blocked = ("  | REJECTED: conf %d, no-tube %d, off-tube %d, outside-band %d, lockout %d, "
+               "queue-full %d -> COMMITTED %d%s"
+               % (t["blk_conf"], t["no_tube"], t["off_tube"], t["blk_band"], t["blk_lockout"],
+                  t["blk_full"], t["committed"],
+                  ("  | commit gaps %s" % t["commit_gaps"]) if t["commit_gaps"] else ""))
+    offs = sorted(t["offsets"])
+    on_tube = len(offs) - t["off_tube"]
+    extra = ("  | ON-TUBE FILTER: %d boxes checked, %d on the tube, %d rejected off it, "
+             "%d with no tube at all%s"
+             % (len(offs), on_tube, t["off_tube"], t["no_tube"],
+                (" | box-x minus tube-x  p10 %+d  med %+d  p90 %+d"
+                 % (offs[len(offs) // 10], offs[len(offs) // 2], offs[-1 - len(offs) // 10]))
+                if len(offs) >= 10 else "")) if (offs or t["no_tube"]) else ""
     reach_px = h * _EMIT_MIN_Y_FRAC if h else 0
     return ("  emitters: %d/%d frames had a box | %d passed conf>=%.2f | %d ALSO low enough "
             "(y>=%.0f) | best conf %.2f at y=%s%s"
@@ -803,56 +934,7 @@ def _emit_tally_line(h):
                "  <- boxes are too HIGH in frame, not too weak"
                if t["conf_ok"] and not t["reach_ok"] else
                "  <- boxes are below the confidence gate"
-               if t["detected"] and not t["conf_ok"] else ""))
-
-
-def _emit_queue(targets, travelled, gap, dedupe_m=None):
-    """Fold one emitter observation into the pending-target list. Pure, so it is testable.
-
-    `gap` is metres from the punch tip to the emitter right now (from _emitter_ground_m). The target
-    is therefore `travelled + gap`: the odometer reading at which that emitter will be under the
-    punch.
-
-    THE SELF-DEDUPLICATION THAT MAKES THE COUNT RIGHT. As the robot advances, `travelled` grows by
-    exactly as much as `gap` shrinks, so one physical emitter produces the SAME target on every frame
-    it is seen in, whatever row it occupies. Observations agreeing within `dedupe_m` are therefore
-    one emitter, and the estimate is REFINED toward the newest observation — the emitter is nearer
-    then, so both the y-to-distance interpolation error and the remaining travel are smaller.
-
-    This replaced a visibility-edge debounce that could not work: with the camera's 0.43 m view wider
-    than the 0.40 m emitter spacing there is nearly always an emitter in frame, so "wait until none
-    is visible" never came true. It is also why a capped creep was not enough — +/-5 cm placement
-    needs the robot to cover the full 0.39 m punch offset, and it can only do that without driving
-    past the next emitter by keeping several targets in flight.
-
-    Returns a new sorted list.
-    """
-    dedupe_m = _EMIT_DEDUPE_M if dedupe_m is None else dedupe_m
-    t = travelled + gap
-    out = list(targets)
-    for i, existing in enumerate(out):
-        if abs(existing - t) <= dedupe_m:
-            # same emitter, seen again and now nearer: trust the newer estimate more
-            out[i] = 0.35 * existing + 0.65 * t
-            return sorted(out)
-    out.append(t)
-    return sorted(out)
-
-
-def _emit_due(targets, travelled, last_plant_at):
-    """The head of the queue, if the robot has reached it. Pure.
-
-    Returns (target, rest) or (None, targets). The _min_replant() floor is a safety net against two
-    punches on top of each other; the dedupe in _emit_queue is what actually separates emitters.
-    """
-    if not targets:
-        return None, targets
-    head = targets[0]
-    if travelled + 1e-9 < head:
-        return None, targets
-    if travelled - last_plant_at < _min_replant():
-        return None, targets
-    return head, targets[1:]
+               if t["detected"] and not t["conf_ok"] else "") + extra + blocked)
 
 
 def _emitter_in_reach(emit, h):
@@ -1431,7 +1513,8 @@ def _cam_loop_run(url, held):
     odo = FlowOdometer()
     travelled = 0.0             # estimated distance along the lateral this run
     last_plant_at = -1e9        # travelled-at-last-plant, so the first emitter is never gated
-    emit_targets = []           # conveyor: odometer readings at which an emitter reaches the punch
+    emit_pending = []           # committed targets: odometer readings at which to punch
+    emit_last_commit = -1e9     # travelled at the last commit; the whole debounce
     armed = True                # detection-edge debounce (see the drip branch)
     driving_since = None        # when the current drive segment began
     tube_seen = None            # last tube["found"], for EDGE logging (None = no edge yet)
@@ -1654,7 +1737,7 @@ def _cam_loop_run(url, held):
             _track_reset()
             _tube_grace_reset()
             last_plant_at, armed, driving_since = -1e9, True, None
-            emit_targets = []
+            emit_pending, emit_last_commit = [], -1e9
         prev_run_state = _run["state"]
 
         # Tube found/lost EDGE logging. Logging every frame would flood at frame rate,
@@ -1841,7 +1924,7 @@ def _cam_loop_run(url, held):
                 travelled = 0.0
                 last_plant_at = -1e9                  # first emitter of a row is never gated
                 armed = True
-                emit_targets = []                     # a new lateral starts with an empty conveyor
+                emit_pending, emit_last_commit = [], -1e9
                 driving_since = None
                 _emit_run()
             elif traversed >= _traverse_max():
@@ -1895,12 +1978,101 @@ def _cam_loop_run(url, held):
             # test) is no longer the trigger — it only decides which observations are trustworthy
             # enough to queue, because a detection near the bottom of frame has the least
             # y-to-distance interpolation error and the shortest remaining travel.
-            if detected:
-                _gap_now = _emitter_ground_m(emit, h)
-                if _gap_now and _gap_now > 0.0:
-                    emit_targets = _emit_queue(emit_targets, travelled, _gap_now)
-            _due, _rest = _emit_due(emit_targets, travelled, last_plant_at)
-            plant_ok = _due is not None
+            # THE EMITTER ALGORITHM, reduced to what the field actually supports.
+            #
+            #   a detection inside the band, and far enough since the last one -> commit
+            #   drive to the committed target -> punch
+            #
+            # THE MEASUREMENT THAT KILLED EVERYTHING FANCIER. Four earlier designs all rested on some
+            # signal going quiet between emitters — "no emitter visible", "the band clears", "the
+            # reach zone empties". On the 08:26 run the band was occupied on 70-96% of frames
+            # (43/62, 23/47, 33/56, 51/53), so it essentially NEVER clears, and every edge-triggered
+            # scheme degenerates: that run punched 20 times for 10 emitters, each one twice, paced by
+            # my own 0.06 m lockout rather than by the emitters.
+            #
+            # So this design assumes nothing about the signal clearing. It uses the detection ONLY to
+            # say "there is an emitter about here", and DISTANCE to say "that is a different one".
+            #
+            # THE TWO INEQUALITIES, from the run's own numbers:
+            #     band depth (how long an emitter stays in the band) = 0.55 x gap = 0.22 m at 0.40 m
+            #     smallest REAL spacing measured                    = 0.40 m
+            #     lockout must be  > 0.22  so one emitter cannot commit twice
+            #                  and < 0.40  so the next emitter is not skipped
+            #     0.70 x gap = 0.28 m sits in the middle of that window.
+            #
+            # What the field already proves works and is untouched here: recall (every emitter on the
+            # stretch was found) and placement (+0 to +8 mm on all 20 punches).
+            #
+            # NOTE the configured gap was 0.40 m while the real spacing measured 0.40-0.55 m. The
+            # lockout is derived from the CONFIGURED value, so setting it much larger than the truth
+            # would start skipping emitters. It is the one setting that matters here.
+            _boxes = emit.get("boxes")
+            if _boxes is None and emit.get("detected"):        # classical detector: single box
+                _boxes = [{"position": emit.get("position"), "confidence": emit.get("confidence")}]
+            # NO TUBE IN VIEW MEANS NO EMITTER, whatever the model says. An emitter is a fitting on
+            # the tube; if we cannot see the tube we cannot be looking at one. On leaf litter this
+            # alone rejected 138 of 145 boxes.
+            # NO TUBE IN VIEW MEANS NO EMITTER, whatever the model says — an emitter is a fitting
+            # ON the tube. THIS FILTER IS NOT YET PROVEN AGAINST A REAL RUN: it was measured on leaf
+            # litter with NO tube in frame, where 138 of 145 boxes were rejected simply because no
+            # tube was found. During a run the tube IS found, so that rejection does not apply, and
+            # whether the run's false positives sit ON the tube or beside it is UNKNOWN. Hence the
+            # offsets below are counted and logged: one run settles it.
+            _tube_x = tube["x_near"] if tube["found"] else None
+            _win = _emit_on_tube_px(tube)
+            _low_gap = _low_y = _low_off = None
+            for _b in (_boxes or []):          # sorted nearest-first by emitter_ml
+                _pos = _b.get("position")
+                if not _pos or float(_b.get("confidence") or 0.0) < _EMIT_CONF:
+                    _emit_tally["blk_conf"] += 1
+                    continue
+                if _tube_x is None:
+                    _emit_tally["no_tube"] += 1
+                    continue
+                # the tube's column AT THE BOX'S OWN ROW — see _tube_x_at
+                _tx = _tube_x_at(tube, _pos[1], h)
+                if _tx is None:
+                    _tx = _tube_x
+                _off = _pos[0] - _tx
+                _emit_tally["offsets"].append(round(_off))
+                if abs(_off) > _win:
+                    _emit_tally["off_tube"] += 1
+                    continue                   # off the tube: litter, not an emitter
+                _g = _emitter_ground_m({"position": _pos}, h)
+                if _g and _g > 0.0:
+                    _low_gap = _g
+                    _low_y = _pos[1]
+                    _low_off = _off
+                    break
+
+            if _low_gap is not None:
+                _band = _emit_band_m()
+                _lock = _emit_lockout_m()
+                _since = travelled - emit_last_commit
+                if _low_gap > _PUNCH_TO_FRAME_NEAR_M + _band:
+                    _emit_tally["blk_band"] += 1
+                elif _since < _lock:
+                    _emit_tally["blk_lockout"] += 1
+                elif len(emit_pending) >= _EMIT_MAX_PENDING:
+                    _emit_tally["blk_full"] += 1
+                else:
+                    emit_pending.append(travelled + _low_gap)
+                    if emit_last_commit > -1e8:
+                        _emit_tally["commit_gaps"].append(round(_since, 2))
+                    emit_last_commit = travelled
+                    _emit_tally["committed"] += 1
+                    # EVERYTHING behind the decision, on one line: which row the box was in, how far
+                    # off the tube it sat, the distance that follows from that row, where we were, and
+                    # where we will punch. Reconstructing a bad stop from separate lines has failed
+                    # repeatedly.
+                    log("  emitter %d: box y=%.0f off-tube %+.0fpx -> %.0fcm ahead | at %.2fm, "
+                        "%.2fm since last (lock %.2f) -> punch at %.2fm"
+                        % (_run["planted"] + len(emit_pending), _low_y, _low_off,
+                           _low_gap * 100, travelled, _since if _since < 1e7 else 0.0,
+                           _lock, emit_pending[-1]))
+
+            plant_ok = bool(emit_pending) and travelled >= emit_pending[0]
+            _due = emit_pending[0] if plant_ok else None
 
             if not tube["found"]:
                 # NO TUBE IN VIEW -> STOP, whatever else is happening this frame.
@@ -1946,11 +2118,11 @@ def _cam_loop_run(url, held):
                 # positions on the 07:18 run of 2026-08-19. Capping the creep would fix the count and
                 # break the placement (short by up to 14 cm against a +/-5 cm requirement), which is
                 # why the trigger moved instead of the distance.
-                emit_targets = _rest
+                emit_pending = emit_pending[1:]
                 _err_m = travelled - _due          # how far past the target we actually stopped
                 log("  emitter %d — punch reached (target %.2fm, stopped at %.2fm, %+.0fmm), "
                     "%d more queued"
-                    % (_run["planted"] + 1, _due, travelled, _err_m * 1000, len(emit_targets)))
+                    % (_run["planted"] + 1, _due, travelled, _err_m * 1000, len(emit_pending)))
 
                 # One stop, then plant at EVERY selected arm position: [0, 90] gives
                 # a 4-seed cross (0/180 then 90/270).
