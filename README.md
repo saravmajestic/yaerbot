@@ -1,8 +1,16 @@
-# yaerbot — Farm OS seeding robot
+# YaerBot — Farm OS seeding robot
+
+> **yaer** — from **ஏர்** (_ēr_), the Tamil word for the plough: the tool that till the
+> soil before sowing.
 
 An autonomous seeding robot for the **Arduino Physical AI Challenge India 2026**, built on a
 single **Arduino UNO Q**. It _plans_ what and when to sow, _acts_ on either plain or
 drip-irrigated ground, and _reports_ a map of every seed it placed.
+
+<p align="center">
+  <img src="assets/Yaerbot.jpg" width="820"
+       alt="The yaerbot seeding robot straddling a black drip line on prepared soil, its USB camera looking down at the tube, turmeric and onion seedlings either side.">
+</p>
 
 **Two AI models run on the board itself, with no network:**
 
@@ -21,9 +29,6 @@ On the same board, while it drives:
   turns, on ground whose grip changes as it goes.
 - **The microcontroller** times the seed punch to the millisecond, so a busy Linux side cannot
   stretch how long a pulse-rated solenoid stays energised.
-
-> **yaer** — from **ஏர்** (_ēr_), the Tamil word for the plough: the tool that opened the
-> soil before sowing.
 
 **Contents** 
 - [Why](#why) 

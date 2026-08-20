@@ -34,3 +34,8 @@ console/battery.csv
 # It exists so a run survives an app restart; it is machine output, not source.
 console/console.log
 console/console.log.1
+
+# Demo video: 561 MB, far past GitHub's 100 MB per-file push limit.
+# Keep footage out of the repo — upload it to the submission form or a host.
+assets/*.mp4
+assets/*.mov
