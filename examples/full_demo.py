@@ -26,7 +26,7 @@ def main() -> None:
     print(f"recommended date: {rec.recommended_date}  (both systems agree: {rec.both_agree})")
     print(f"  panchangam: {rec.nakshatra} ({rec.nakshatra_tamil}) -> {rec.nokku} nokku")
     print(f"  biodynamic: {rec.biodynamic} day")
-    print(f"  alternatives: {rec.alternatives}")
+    print(f"  alternatives: {rec.alternatives_both}")
     print(f"rationale: {rec.rationale}\n")
 
     # ── Act 2: plan + execute the seeding ──

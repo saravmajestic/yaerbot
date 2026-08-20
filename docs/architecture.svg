@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" role="img" aria-label="Farm OS system architecture: one Arduino UNO Q, a Qualcomm Linux side running the console, OpenCV tube detection, a FOMO emitter model and an LLM planner, joined over RouterBridge to an STM32U585 that drives the motors, servos, solenoid punch and gyro.">
+<defs>
+<marker id="a-2E6FB0" viewBox="0 0 10 8" refX="8" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L9,3.5 L0,7 Z" fill="#2E6FB0"/></marker>
+<marker id="s-2E6FB0" viewBox="0 0 10 8" refX="1" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M9,0 L0,3.5 L9,7 Z" fill="#2E6FB0"/></marker>
+<marker id="a-C0392B" viewBox="0 0 10 8" refX="8" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L9,3.5 L0,7 Z" fill="#C0392B"/></marker>
+<marker id="s-C0392B" viewBox="0 0 10 8" refX="1" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M9,0 L0,3.5 L9,7 Z" fill="#C0392B"/></marker>
+<marker id="a-2E8B57" viewBox="0 0 10 8" refX="8" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L9,3.5 L0,7 Z" fill="#2E8B57"/></marker>
+<marker id="s-2E8B57" viewBox="0 0 10 8" refX="1" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M9,0 L0,3.5 L9,7 Z" fill="#2E8B57"/></marker>
+<marker id="a-5C6875" viewBox="0 0 10 8" refX="8" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L9,3.5 L0,7 Z" fill="#5C6875"/></marker>
+<marker id="s-5C6875" viewBox="0 0 10 8" refX="1" refY="3.5" markerWidth="7" markerHeight="6" orient="auto-start-reverse"><path d="M9,0 L0,3.5 L9,7 Z" fill="#5C6875"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="720" rx="0" fill="#EDF1F5"/>
+<rect x="290" y="64" width="660" height="526" rx="14" fill="#FFFFFF" stroke="#1F2A36" stroke-width="2.5"/>
+<text x="310" y="98" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="25" font-weight="700" fill="#1F2A36" text-anchor="start">Arduino UNO Q</text>
+<text x="930" y="98" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="400" fill="#5C6875" text-anchor="end">one board · nothing else</text>
+<rect x="306" y="104" width="628" height="182" rx="10" fill="#F2F6FA" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="322" y="130" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="18" font-weight="700" fill="#1F2A36" text-anchor="start">Qualcomm QRB2210 · Linux</text>
+<text x="322" y="149" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#5C6875" text-anchor="start" font-style="italic">thinking — no deadlines</text>
+<rect x="322" y="166" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="392" y="194" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Web console</text>
+<text x="392" y="213" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">operator UI</text>
+<rect x="474" y="166" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="544" y="194" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Tube detection</text>
+<text x="544" y="213" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">OpenCV</text>
+<rect x="626" y="166" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#2E8B57" stroke-width="2"/>
+<text x="696" y="194" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Emitter model</text>
+<text x="696" y="213" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">Edge Impulse FOMO</text>
+<rect x="736" y="157" width="26" height="18" rx="9" fill="#2E8B57"/>
+<text x="749" y="170" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">AI</text>
+<rect x="778" y="166" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#2E8B57" stroke-width="2"/>
+<text x="848" y="194" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Crop planner</text>
+<text x="848" y="213" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">on-device LLM</text>
+<rect x="888" y="157" width="26" height="18" rx="9" fill="#2E8B57"/>
+<text x="901" y="170" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">AI</text>
+<text x="322" y="262" font-family="ui-monospace,'SF Mono',Menlo,Consolas,monospace" font-size="13" font-weight="400" fill="#5C6875" text-anchor="start">path planner · run log · farm-map report</text>
+<rect x="306" y="318" width="628" height="54" rx="9" fill="#FFFFFF" stroke="#2E6FB0" stroke-width="2"/>
+<text x="322" y="351" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="17" font-weight="700" fill="#2E6FB0" text-anchor="start">RouterBridge</text>
+<line x1="506" y1="302" x2="506" y2="326" stroke="#2E6FB0" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-2E6FB0)"/>
+<text x="518" y="314" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="500" fill="#1F2A36" text-anchor="start">15 RPCs — every actuator command</text>
+<line x1="506" y1="388" x2="506" y2="364" stroke="#5C6875" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-5C6875)"/>
+<text x="518" y="384" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#5C6875" text-anchor="start">getDiag — what actually reached the driver pins</text>
+<rect x="306" y="386" width="628" height="162" rx="10" fill="#FBF4EC" stroke="#A6844A" stroke-width="1.3"/>
+<text x="322" y="412" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="18" font-weight="700" fill="#1F2A36" text-anchor="start">STM32U585 · microcontroller</text>
+<text x="322" y="431" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="13" font-weight="400" fill="#5C6875" text-anchor="start" font-style="italic">acting — to the millisecond</text>
+<rect x="322" y="448" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="392" y="476" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Motor PWM</text>
+<text x="392" y="495" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">4WD skid-steer</text>
+<rect x="474" y="448" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="544" y="476" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Two servos</text>
+<text x="544" y="495" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">spool + drum</text>
+<rect x="626" y="448" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="696" y="476" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Solenoid punch</text>
+<text x="696" y="495" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">500 ms, atomic</text>
+<rect x="778" y="448" width="140" height="62" rx="7" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="848" y="476" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Gyro I²C</text>
+<text x="848" y="495" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">closed-loop heading</text>
+<rect x="28" y="96" width="222" height="58" rx="10" fill="#FFFFFF" stroke="#2E8B57" stroke-width="2"/>
+<text x="139" y="122" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="17" font-weight="700" fill="#2E8B57" text-anchor="middle">No cloud</text>
+<text x="139" y="141" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">both models run on the board</text>
+<rect x="28" y="196" width="222" height="74" rx="10" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="139" y="222" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Operator's browser</text>
+<text x="139" y="241" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">phone or laptop</text>
+<text x="139" y="258" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">own hotspot, or your network</text>
+<line x1="250" y1="233" x2="284" y2="233" stroke="#2E6FB0" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-2E6FB0)"/>
+<text x="270" y="224" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="600" fill="#2E6FB0" text-anchor="middle">WiFi</text>
+<rect x="28" y="420" width="222" height="108" rx="10" fill="#FFFFFF" stroke="#C0392B" stroke-width="1.6"/>
+<text x="139" y="446" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">3S LiPo</text>
+<text x="139" y="468" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">20 A main → branch fuses</text>
+<text x="139" y="486" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">12 V → 5 V buck</text>
+<text x="139" y="508" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#C0392B" text-anchor="middle">a fuse per branch, per wire</text>
+<line x1="250" y1="474" x2="284" y2="474" stroke="#C0392B" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-C0392B)"/>
+<rect x="990" y="116" width="262" height="74" rx="10" fill="#E8D8A8" stroke="#A6844A" stroke-width="1.5"/>
+<text x="1121" y="142" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">USB camera</text>
+<text x="1121" y="161" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">320×240 at 30 fps</text>
+<text x="1121" y="178" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">focus locked by udev</text>
+<line x1="990" y1="153" x2="956" y2="153" stroke="#2E6FB0" stroke-width="2.2" stroke-linecap="round" marker-start="url(#s-2E6FB0)"/>
+<rect x="990" y="300" width="262" height="62" rx="10" fill="#E8D8A8" stroke="#A6844A" stroke-width="1.5"/>
+<text x="1121" y="326" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">MPU-6050 gyro</text>
+<text x="1121" y="345" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">Wire2 on A4/A5</text>
+<line x1="990" y1="331" x2="956" y2="331" stroke="#2E6FB0" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-2E6FB0)" marker-start="url(#s-2E6FB0)"/>
+<rect x="990" y="390" width="262" height="74" rx="10" fill="#E8D8A8" stroke="#A6844A" stroke-width="1.5"/>
+<text x="1121" y="416" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">2× IBT-2 drivers</text>
+<text x="1121" y="435" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">4 gear motors</text>
+<text x="1121" y="452" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">one per side, 2 in parallel</text>
+<line x1="956" y1="427" x2="984" y2="427" stroke="#C0392B" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-C0392B)"/>
+<rect x="990" y="486" width="262" height="74" rx="10" fill="#E8D8A8" stroke="#A6844A" stroke-width="1.5"/>
+<text x="1121" y="512" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="15" font-weight="600" fill="#1F2A36" text-anchor="middle">Seeder</text>
+<text x="1121" y="531" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">S3003 spool · SG90 drum</text>
+<text x="1121" y="548" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="12.5" font-weight="400" fill="#5C6875" text-anchor="middle">solenoid punch</text>
+<line x1="956" y1="523" x2="984" y2="523" stroke="#C0392B" stroke-width="2.2" stroke-linecap="round" marker-end="url(#a-C0392B)"/>
+<rect x="28" y="622" width="1224" height="72" rx="10" fill="#FFFFFF" stroke="#C4CDD6" stroke-width="1.3"/>
+<text x="48" y="649" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="500" fill="#1F2A36" text-anchor="start">The punch holds for 500 ms, timed by the microcontroller — a garbage-collection pause on the Linux side cannot stretch it.</text>
+<text x="48" y="674" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="14" font-weight="400" fill="#5C6875" text-anchor="start">Both AI models run here, staggered and never concurrent: about 1 GB is free with a model resident. Nothing leaves the robot.</text>
+</svg>
