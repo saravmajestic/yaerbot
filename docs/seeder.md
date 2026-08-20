@@ -16,7 +16,7 @@
 > | Soil readings change the pattern at each emitter | **No soil sensors fitted** |
 > | GPS logged for every seed | **No GPS.** ±2–5 m is worse than dead reckoning on a 4 m plot. |
 > | RPi5 server, mobile app, WhatsApp | A web page served by the robot itself |
-> | 6 seeds in a ring, 60° apart | 2 outlets 180° apart; the arm turns to set angles. **One punch fitted, not two.** |
+> | 6 seeds in a ring, 60° apart, one in the centre | **One punch fitted, not two**, so the punch sweeps a semicircle: one hole per arm angle, fixed 100 mm radius, no centre hole |
 > | Vibration motor shakes the hopper | **Not fitted** |
 
 ---
@@ -305,13 +305,23 @@ Because the count depends on pocket size, the pocket lives in a **swappable drum
 
 ## Problem 3: Crop-Specific Pattern Configuration ⚠️
 
-> **Built instead:** the arm turns to any set of angles you choose, so the pattern is a setting rather than
-> hardware — that part holds. But the outlets are 180° apart and only one punch is fitted, so
-> the rings below are not what a run produces. `[0, 90]` gives a 4-seed cross.
+> **Built instead:** the principle holds — you set the arm angles in the console, so the pattern is a
+> setting and not a hardware change. **The patterns defined below are not reachable**, for three
+> reasons:
+>
+> - **No centre seed.** The punch sits at the end of a 100 mm arm, offset from the hub. There is
+>   no position over the drip centre, so every `center_seed: true` pattern is out.
+> - **Half a circle, not a ring.** Angles are taken mod 180 because the design assumed two
+>   outlets 180° apart. Only one punch is fitted, so the punch sweeps a semicircle — a ring of
+>   8 cannot be planted.
+> - **Radius is fixed** by the arm length. It is not per-crop.
+>
+> What a run actually plants: one hole per arm angle, on a 100 mm radius, across a semicircle.
+> `[0, 90]` gives two holes 90° apart. Fitting the second punch would restore the full ring.
 
 All patterns configurable in Farm OS mobile app. No hardware changes between crops.
 
-### Pattern Definitions ⚠️
+### Pattern Definitions ⬜
 
 ```json
 {
@@ -369,28 +379,6 @@ All patterns configurable in Farm OS mobile app. No hardware changes between cro
 ```
 
 **Custom pattern:** Farmer can define own geometry. App shows visual preview of pattern before confirming.
-
-### Visual Pattern Examples ⚠️
-
-```
-SESAME (1 center + 6 at 10cm radius):     GROUNDNUT (4 at 10cm radius):
-
-           ●                                        ●
-     ●     ●     ●                            
-       ↘   ●   ↙                              ●   ●
-         [drip]                                 [drip]
-       ↗       ↖                              ●   ●
-     ●           ●
-                                                  ●
-
-ONION (8 at 6cm radius):               TOMATO (1 center + 3 at 8cm):
-
-        ●   ●                                   ●
-      ●       ●                           ●   [drip]   ●
-      ●  [drip]  ●                              ●
-      ●       ●
-        ●   ●
-```
 
 ---
 
@@ -512,8 +500,9 @@ See [`bom.md`](bom.md) — that is the as-built list, kept current.
 
 ## Pre-Run Checklist (Farmer Flow) ⚠️
 
-> **Built instead:** the same idea, done in a web page the robot serves — no mobile app. There is no hopper
-> drum to swap for the demo crop.
+> **Built instead:** the same flow, in a web page the robot serves — no mobile app. The hopper and the
+> swappable pocket drums are built as described: one drum per seed size, slide it off the servo
+> horn and fit another.
 
 ```
 1. Attach seeder arm to rear mount          (30 seconds)

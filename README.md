@@ -75,6 +75,11 @@ Circuit-level detail is in [`docs/schematic/`](docs/schematic/index.html).
 - **On-device AI** — an Edge Impulse **FOMO** model for emitter detection, and a small LLM via
   Ollama for the planner, run **staggered, never concurrent** with the vision model.
 - **Sensing** — the camera and the gyro. No soil probes and no GPS are fitted.
+- **Seeder** — a hopper feeds a **pocket drum** that meters seed by volume, not by timing, so a
+  seed cannot be crushed between closing surfaces. Seed size is handled by **swapping the
+  drum**: one printed drum per size, slid off the servo horn and replaced. Groundnut to sesame
+  needs no other change. The arm then turns to whichever angles you set, so the planting
+  pattern is a setting rather than a mechanism.
 
 ## How the UNO Q is used
 
@@ -188,7 +193,7 @@ docs/                    see the index below
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`bom.md`](docs/bom.md)                           | **bill of materials, as built** — plus what was evaluated and rejected                                                                                                                                                               |
 | [`schematic/`](docs/schematic/index.html)         | **circuit schematics, as built** — power distribution and protection, drive, seeder, gyro. Colour-coded by net; generated from code by [`scripts/gen_schematic.py`](scripts/gen_schematic.py) so they cannot drift from the firmware |
-| [`seeder.md`](docs/seeder.md)                     | the seeding mechanism — spool, metering drum, solenoid punch                                                                                                                                                                         |
+| [`seeder.md`](docs/seeder.md)                     | the seeding mechanism — arm, hopper, swappable pocket drums, solenoid punch. **The pre-build design doc**: every section is tagged built / different / not built                                                                     |
 | [`ml-emitter-model.md`](docs/ml-emitter-model.md) | **the AI workflow** — capture → label → train FOMO → deploy on-device                                                                                                                                                                |
 | [`drive-precision.md`](docs/drive-precision.md)   | open-loop drive model, calibration method, error budget                                                                                                                                                                              |
 | [`troubleshooting.md`](docs/troubleshooting.md)   | every hardware fault hit during the build, with root cause and fix                                                                                                                                                                   |

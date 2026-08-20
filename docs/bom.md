@@ -52,7 +52,8 @@ PWM is available on **D3, D5, D6, D9** only, and calling `pinMode()` on a PWM pi
 | Item | Spec / pins | Qty | ₹ |
 |---|---|---:|---:|
 | **S3003 servo** | spool / arm rotation — **D10**. Calibrated: physical 90° ← servo command 64 | 1 | ~250 |
-| **SG90 micro servo** | 2-pocket metering drum — **D11** | 1 | 90 |
+| **SG90 micro servo** | turns the metering drum — **D11** | 1 | 90 |
+| **Hopper + pocket drums** | printed hopper feeding a pocket drum that meters by volume. **One drum per seed size** — slide it off the servo horn and fit another, no other change | 1 + drums | — |
 | **JF-0530B solenoid** | push-pull, **12 V**, 5 N, 10 mm stroke, spring return — the punch. **One fitted, at one end of the arm** | 1 | 433 |
 | IRLZ44N MOSFET | logic-level N-ch, solenoid low-side driver — gate on **A3** via 100 Ω | 1 | 39 |
 | 1N4007 diode | flyback across the coil, **band (cathode) to +12 V** | 1 | ~3 |
@@ -61,7 +62,8 @@ PWM is available on **D3, D5, D6, D9** only, and calling `pinMode()` on a PWM pi
 | **Lazy-susan bearing** | carries the rotating arm — takes the punch load off the servo | 1 | — |
 | M3 hardware / brass inserts | arm + tip assembly | — | ~200 |
 
-3D-printed parts (PETG/PLA): seeder arm body, spool hub, metering drum, hollow tip housing.
+3D-printed parts (PETG/PLA): seeder arm body, spool hub, hopper, pocket drums (one per seed
+size), hollow tip housing.
 
 <details>
 <summary><b>Why the servos are on digital pins, and one call that hangs the MCU</b></summary>
