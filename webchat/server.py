@@ -16,18 +16,49 @@ import json
 import os
 import sys
 import urllib.request
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from farmos.planner import survey, recommend, price_summary, weather_summary, known_crops
+from farmos.planner.almanac import coverage
 from farmos.planner.llm import present_messages, PRESENT_OPTIONS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL = os.environ.get("PLANNER_MODEL", "qwen2.5:1.5b")
-DEFAULT_AFTER = os.environ.get("PLANNER_AFTER", "2026-08-10")
+
 LOCATION = os.environ.get("PLANNER_LOCATION", "salem")
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+def _after() -> str:
+    """First day the sowing window may recommend.
+
+    RESOLVED PER REQUEST, not at import. This runs under systemd with Restart=always, so a
+    module-level date would freeze at whatever day the service started. That is a milder version
+    of the bug this replaced: the default was the hardcoded string "2026-08-10" -- the first day
+    of the cached panchangam -- so on any later day the planner offered dates already in the past.
+
+    PLANNER_AFTER still overrides, for reproducing a specific day.
+    """
+    return os.environ.get("PLANNER_AFTER") or date.today().isoformat()
+
+
+def _window_info() -> dict:
+    """How far the answer can actually see.
+
+    survey_window() silently drops days the panchangam cache does not cover, so once the window
+    runs past the cache a data gap looks exactly like a real "no favourable dates" answer.
+    Refresh the cache when days_left gets small.
+    """
+    after = _after()
+    cache_start, cache_end = coverage()
+    days_left = ((date.fromisoformat(cache_end) - date.fromisoformat(after)).days
+                 if cache_end else None)
+    return {"after": after, "cache_start": cache_start, "cache_end": cache_end,
+            "days_left": days_left,
+            "exhausted": bool(days_left is not None and days_left < 0)}
 
 
 def parse_crop(message: str) -> str | None:
@@ -36,10 +67,10 @@ def parse_crop(message: str) -> str | None:
 
 
 def _context(crop: str):
-    data = survey(crop, after=DEFAULT_AFTER)
+    data = survey(crop, after=_after())
     price = price_summary(crop)
     try:
-        weather = weather_summary(LOCATION, recommended_date=recommend(crop, after=DEFAULT_AFTER).recommended_date)
+        weather = weather_summary(LOCATION, recommended_date=recommend(crop, after=_after()).recommended_date)
     except Exception:
         weather = None
     return data, price, weather
@@ -48,7 +79,7 @@ def _context(crop: str):
 def build_data(crop: str) -> dict:
     """Deterministic card data — no LLM, fast."""
     data, price, weather = _context(crop)
-    rec = recommend(crop, after=DEFAULT_AFTER)
+    rec = recommend(crop, after=_after())
     return {
         "crop": crop, "recommended_date": rec.recommended_date, "both_agree": rec.both_agree,
         "nakshatra": rec.nakshatra, "nakshatra_tamil": rec.nakshatra_tamil,
@@ -56,6 +87,7 @@ def build_data(crop: str) -> dict:
         "alternatives": {"panchangam": [r["date"] for r in data["panchangam_only"]],
                          "biodynamic": [r["date"] for r in data["biodynamic_only"]]},
         "avoid_days": data["avoid_days_kari_naal"], "price": price, "weather": weather,
+        "window": _window_info(),
     }
 
 

@@ -640,5 +640,5 @@ document.getElementById('btn-shutdown').addEventListener('click', () => {
   }
   sendBtn.addEventListener('click', planSend);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') planSend(); });
-  pb('bot').innerHTML = `<div class="pl-prose">Tell me what you want to plant and I'll check the Tamil panchangam (Nokku Naal) and the biodynamic calendar, then recommend a sowing date with alternatives. Try "groundnut".</div>`;
+  pb('bot').innerHTML = `<div class="pl-prose">Tell me what you want to plant. I follow your two calendars — the Tamil panchangam (Nokku Naal) and the biodynamic calendar — and recommend a sowing date that suits both, with alternatives if you cannot wait. Try "groundnut".</div>`;
 })();
