@@ -104,7 +104,7 @@ flowchart TB
 
 A fuller version, laid out around the same idea and sized for a slide or a video frame:
 [`docs/architecture.svg`](docs/architecture.svg) (PNG: [`architecture@2x.png`](docs/architecture@2x.png)).
-Circuit-level detail is in [`docs/schematic/`](docs/schematic/index.html).
+Circuit-level detail is in [`docs/schematic/`](docs/schematic/).
 
 - **Arduino UNO Q** — Qualcomm Linux side (App Lab Python app, on-device CV + LLM) **+**
   STM32U585 MCU (real-time GPIO / motor + seeder control over RouterBridge RPCs).
@@ -163,7 +163,7 @@ solenoid's MOSFET gate. And **A4/A5 went to the gyro**, because they carry `Wire
 only I2C the board actually exposes: the header pins silk-screened SDA/SCL have no I2C
 peripheral behind them on this core. That cost the battery monitor its input.
 
-Full sheets, colour-coded by net: [`docs/schematic/`](docs/schematic/index.html).
+Full sheets, colour-coded by net: [`docs/schematic/`](docs/schematic/).
 
 ### Board behaviour we had to find the hard way
 
@@ -232,7 +232,7 @@ docs/                    see the index below
 | Doc                                               | What it covers                                                                                                                                                                                                                       |
 | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [`bom.md`](docs/bom.md)                           | **bill of materials, as built** — plus what was evaluated and rejected                                                                                                                                                               |
-| [`schematic/`](docs/schematic/index.html)         | **circuit schematics, as built** — power distribution and protection, drive, seeder, gyro. Colour-coded by net; generated from code by [`scripts/gen_schematic.py`](scripts/gen_schematic.py) so they cannot drift from the firmware |
+| [`schematic/`](docs/schematic/)         | **circuit schematics, as built** — power distribution and protection, drive, seeder, gyro. Colour-coded by net; generated from code by [`scripts/gen_schematic.py`](scripts/gen_schematic.py) so they cannot drift from the firmware |
 | [`seeder.md`](docs/seeder.md)                     | the seeding mechanism — arm, hopper, swappable pocket drums, solenoid punch. **The pre-build design doc**: every section is tagged built / different / not built                                                                     |
 | [`ml-emitter-model.md`](docs/ml-emitter-model.md) | **the AI workflow** — capture → label → train FOMO → deploy on-device                                                                                                                                                                |
 | [`drive-precision.md`](docs/drive-precision.md)   | open-loop drive model, calibration method, error budget                                                                                                                                                                              |

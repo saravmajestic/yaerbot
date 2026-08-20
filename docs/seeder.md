@@ -7,7 +7,7 @@
 > section is tagged: **✅ built** · **⚠️ different** · **⬜ not built**.
 >
 > What is actually on the robot: [`bom.md`](bom.md) for parts,
-> [`schematic/`](schematic/index.html) for wiring.
+> [`schematic/`](schematic/) for wiring.
 >
 > | Designed | Built |
 > |---|---|

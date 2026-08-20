@@ -1,7 +1,7 @@
 # Bill of Materials — as built
 
 Everything physically fitted to the robot that produced the demo, as of **2026-08-19**. The
-circuit schematics are in [`schematic/`](schematic/index.html) (open `index.html`); the seeder
+circuit schematics are in [`schematic/`](schematic/); the seeder
 mechanism is in [`seeder.md`](seeder.md).
 
 Prices are indicative Indian retail (₹, 2026).
