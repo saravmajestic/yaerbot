@@ -1,9 +1,27 @@
 # Drip-Aligned Adaptive Seeder
 ### Detailed Architecture & Problem Design
 
+> ## ⚠️ This is the design document, not the robot
+>
+> Written before the build. About half was never built, or was built differently. Each
+> section is tagged: **✅ built** · **⚠️ different** · **⬜ not built**.
+>
+> What is actually on the robot: [`bom.md`](bom.md) for parts,
+> [`schematic/`](schematic/index.html) for wiring.
+>
+> | Designed | Built |
+> |---|---|
+> | Camera + soil moisture + tube bump, fused on the STM32 | A trained camera model on the Linux side. No soil input, no fusion. |
+> | HSV colour + Hough lines find the tube | Brightness profile across 4 bands. A black tube on dark soil gives Hough too few edges. |
+> | Soil readings change the pattern at each emitter | **No soil sensors fitted** |
+> | GPS logged for every seed | **No GPS.** ±2–5 m is worse than dead reckoning on a 4 m plot. |
+> | RPi5 server, mobile app, WhatsApp | A web page served by the robot itself |
+> | 6 seeds in a ring, 60° apart | 2 outlets 180° apart; the arm turns to set angles. **One punch fitted, not two.** |
+> | Vibration motor shakes the hopper | **Not fitted** |
+
 ---
 
-## Concept
+## Concept ✅
 
 Standard seeders plant at fixed row intervals — ignoring where water actually reaches. This seeder inverts that: **water location defines planting location.**
 
@@ -13,7 +31,7 @@ Built specifically for drip-irrigated small farms, where emitter spacing defines
 
 ---
 
-## The Three Core Problems
+## The Three Core Problems ✅
 
 ```
 Problem 1: Find emitter centers accurately in real-time
@@ -23,7 +41,7 @@ Problem 3: Handle different crop varieties without hardware changes
 
 ---
 
-## Problem 1: Emitter Detection
+## Problem 1: Emitter Detection ⚠️
 
 ### How Drip Irrigation Looks on the Ground
 
@@ -38,7 +56,13 @@ emitter      emitter      emitter      emitter
 When drip runs: dark wet circle ~15–20cm diameter around each emitter
 ```
 
-### Detection Method A — Tube Following (Camera)
+### Detection Method A — Tube Following (Camera) ⚠️
+
+> **Built instead:** the camera sees 0.43 m of ground and creeps at 0.17 m/s, close to plan. But HSV and
+> Hough were dropped: a black tube on dark soil gives too few edges. The detector takes a
+> brightness profile across four bands of the frame, works out whether the tube is darker or
+> lighter than the soil rather than assuming, and fits a line through the bands that agree.
+> It stops and waits when it loses the tube instead of steering blind.
 
 Black LDPE tube against brown soil = strong visual contrast.
 
@@ -56,7 +80,9 @@ Black LDPE tube against brown soil = strong visual contrast.
 
 ---
 
-### Detection Method B — Moisture Peak Detection (Soil Sensor)
+### Detection Method B — Moisture Peak Detection (Soil Sensor) ⬜
+
+> **Built instead:** nothing. No soil moisture sensor is fitted, so none of this runs.
 
 Soil moisture reading rises as robot approaches an active emitter and peaks directly above it.
 
@@ -80,7 +106,10 @@ Moisture reading profile as robot moves along tube:
 
 ---
 
-### Detection Method C — Emitter Bump Confirmation (Camera)
+### Detection Method C — Emitter Bump Confirmation (Camera) ⬜
+
+> **Built instead:** nothing. Emitters are found by a trained model (Edge Impulse FOMO), not by looking for a
+> bump. Known limit: it also fires on plain tube, so a 12-emitter row draws about 14 stops.
 
 Inline drip emitters create a small cylindrical bump on the tube (2–5mm height). Confirmation layer on top of Method A.
 
@@ -92,7 +121,11 @@ Inline drip emitters create a small cylindrical bump on the tube (2–5mm height
 
 ---
 
-### Fusion Logic (UNO Q — STM32 MCU side)
+### Fusion Logic (UNO Q — STM32 MCU side) ⬜
+
+> **Built instead:** nothing. There is no fusion and no state machine on the MCU. The Linux side decides from
+> the camera alone; the MCU only executes. Clogged-emitter detection needs the moisture
+> input, so it does not exist either.
 
 ```
 State machine running on STM32 real-time MCU:
@@ -120,11 +153,15 @@ EMITTER_POSSIBLE (low confidence)
 
 ---
 
-## Problem 2: Radial Pattern Planting
+## Problem 2: Radial Pattern Planting ⚠️
 
-### Seeder Arm Design
+### Seeder Arm Design ⚠️
 
-Instead of moving the robot body to each seed position (slow, imprecise), a stepper-driven rotating arm executes the radial pattern from a fixed center position.
+> **Built instead:** the arm turns on an **S3003 servo (D10)** and rides a **lazy-susan bearing**,
+> which takes the punch load off the servo. No vibration motor. The solenoid gate is on **A3** —
+> D11 drives the SG90 seed drum.
+
+Instead of moving the robot body to each seed position (slow, imprecise), a servo-driven rotating arm executes the radial pattern from a fixed centre position.
 
 ```
                 [Hopper]  ← 3D printed, rear mount
@@ -135,8 +172,8 @@ Instead of moving the robot body to each seed position (slow, imprecise), a step
                    │
            [silicone tube] ← runs directly outside arm to tip housing
                    │  (hangs freely, flexes at all arm positions)
-         ┌────[Stepper hub]────┐
-         │   28BYJ-48 stepper  │
+         ┌─────[Spool hub]─────┐
+         │     S3003 servo     │
          │                     │
     [Arm — solid PETG, 10cm]
          │  solenoid wires taped along outside
@@ -151,17 +188,22 @@ Instead of moving the robot body to each seed position (slow, imprecise), a step
 
 **Arm materials:**
 - Arm body: solid PETG (printed, impact resistant — no hollow channel needed)
-- Stepper hub: PETG (printed, Double-D bore grips stepper shaft)
+- Spool hub: PETG (printed, grips the S3003 servo horn)
 - Tip housing: PETG (printed, hollow nose, moves with solenoid plunger)
 - Seed tube: 14mm-ID silicone tubing (routes externally from gate to tip housing socket)
-- Solenoid: JF-0530B 12V, controlled via IRLZ44N MOSFET on D11
+- Solenoid: JF-0530B 12V, controlled via IRLZ44N MOSFET on A3
 
 ---
 
-### Execution Sequence Per Emitter
+### Execution Sequence Per Emitter ⚠️
+
+> **Built instead:** the same stop-plant-resume order, and no vibration pulse. `plantSeed` is one command the MCU runs
+> start to finish — drum release, 100 ms settle, coil on 500 ms, coil off — so nothing on the
+> Linux side can stretch the punch. **One punch is fitted, not two**, so an arm position
+> plants one hole.
 
 ```
-T+0s    Robot stops — emitter center aligned under stepper hub
+T+0s    Robot stops — emitter centre aligned under the arm hub
 
 T+1s    Arm at position 0 (0°):
           → vibration motor pulses ~1s (de-bridges seeds into feed throat)
@@ -169,13 +211,13 @@ T+1s    Arm at position 0 (0°):
           → solenoid fires: housing + cone enters soil (10mm stroke)
           → solenoid releases: housing retracts
 
-T+3s    Arm steps to position 1 (60°) — 683 stepper steps
+T+3s    Arm turns to position 1 (60°)
 T+4s      → solenoid fires, gate opens, seed drops, solenoid releases
 T+6s    Arm steps to position 2 (120°)
 T+7s      → plant
           ... repeat for all configured positions ...
 T+12s   Last position planted (max 300° from start — arm never completes full 360°)
-T+13s   Arm reverses back to 0° (stepper runs CCW)
+T+13s   Arm returns to 0°
           → tube untwists as arm returns (silicone, external routing)
 T+15s   UNO Q logs: GPS, timestamp, soil EC, moisture, temp, seeds dropped
 T+16s   Robot resumes tube following
@@ -188,7 +230,7 @@ T+16s   Robot resumes tube following
 
 ---
 
-### Depth Control
+### Depth Control ✅
 
 Depth is set by the arm mounting height above soil. The solenoid stroke is fixed at 10mm — the cone housing punches 7mm into soil (3mm clearance gap + 10mm stroke).
 
@@ -210,7 +252,7 @@ Tip assembly cross-section:
 
 ---
 
-### Seed Metering — Revolver-Style Rotating Pocket Gate
+### Seed Metering — Revolver-Style Rotating Pocket Gate ✅
 
 Seeds are metered by **geometry, not timing**. A solid cylindrical drum with one small pocket (recess) rotates inside a snug bore — exactly like a revolver cylinder or gumball wheel. The pocket captures a fixed volume of seed, carries it around in a closed chamber, and drops it out the bottom. The seed is never squeezed between closing surfaces, so it cannot be crushed.
 
@@ -255,17 +297,21 @@ Because the count depends on pocket size, the pocket lives in a **swappable drum
 
 **Tube routing:** the 14mm-ID silicone tube connects from the drum outlet socket to the tip-housing socket — the tube **pushes into** both ports (not over a barb), keeping the full lumen open so large seeds pass. Runs outside the arm (solid PETG). Slack loop near the outlet absorbs 300° arm rotation without pulling taut.
 
-**Why the seed path is large (14mm tube / 15mm bore):** sized for the biggest target seed (groundnut/maize ~13mm) so every crop passes the same hardware. Trade-offs accepted: a heavier, wider tip (more cantilever load on the stepper shaft), a blunt soil nose needing more punch force (~1.5× margin, see above), and 14mm-ID silicone tube which is industrial-grade (not aquarium air-line). For a small-seed-only build, these could all shrink — revisit if groundnut/maize are dropped.
+**Why the seed path is large (14mm tube / 15mm bore):** sized for the biggest target seed (groundnut/maize ~13mm) so every crop passes the same hardware. Trade-offs accepted: a heavier, wider tip (more cantilever load on the arm), a blunt soil nose needing more punch force (~1.5× margin, see above), and 14mm-ID silicone tube which is industrial-grade (not aquarium air-line). For a small-seed-only build, these could all shrink — revisit if groundnut/maize are dropped.
 
 **Bridging prevention:** the drum self-agitates the bottom of the column each rotation, but seeds can still bridge higher up in the hopper. A coin vibration motor on the hopper wall pulses ~1s during each fill step to break bridges and keep seeds flowing into the feed throat. Runs for **all crops** — the pulse is gentle and cannot harm small seeds (sesame/gram), and it cannot cause over-dispensing because the pocket meters by fixed volume regardless of flow rate. Wide hopper throat + feed funnel further reduce bridging.
 
 ---
 
-## Problem 3: Crop-Specific Pattern Configuration
+## Problem 3: Crop-Specific Pattern Configuration ⚠️
+
+> **Built instead:** the arm turns to any set of angles you choose, so the pattern is a setting rather than
+> hardware — that part holds. But the outlets are 180° apart and only one punch is fitted, so
+> the rings below are not what a run produces. `[0, 90]` gives a 4-seed cross.
 
 All patterns configurable in Farm OS mobile app. No hardware changes between crops.
 
-### Pattern Definitions
+### Pattern Definitions ⚠️
 
 ```json
 {
@@ -324,7 +370,7 @@ All patterns configurable in Farm OS mobile app. No hardware changes between cro
 
 **Custom pattern:** Farmer can define own geometry. App shows visual preview of pattern before confirming.
 
-### Visual Pattern Examples
+### Visual Pattern Examples ⚠️
 
 ```
 SESAME (1 center + 6 at 10cm radius):     GROUNDNUT (4 at 10cm radius):
@@ -348,7 +394,9 @@ ONION (8 at 6cm radius):               TOMATO (1 center + 3 at 8cm):
 
 ---
 
-## Soil Quality Adaptation (AI Layer)
+## Soil Quality Adaptation (AI Layer) ⬜
+
+> **Built instead:** nothing. No soil sensors, so no reading can change the pattern.
 
 On top of the fixed pattern, real-time soil readings from the probe influence seeding decisions:
 
@@ -364,7 +412,11 @@ Adaptation applied per-emitter, not per-row. Row 4 emitter 6 may be treated diff
 
 ---
 
-## GPS Seeding Log
+## GPS Seeding Log ⬜
+
+> **Built instead:** a run log and a generated farm map, with positions from the robot's own odometry. **No
+> GPS**: ±2–5 m is worse than dead reckoning across a 4 m plot, and it gives no heading when
+> the robot is standing still. Real output is committed in `runs/`.
 
 Every seeding event logged to Farm OS database:
 
@@ -392,7 +444,7 @@ Every seeding event logged to Farm OS database:
 
 ---
 
-## Multi-Hopper Variant (Future)
+## Multi-Hopper Variant (Future) ⬜
 
 For farms growing 2 varieties in adjacent rows or alternating emitters, a dual-hopper configuration routes different seeds to the same arm:
 
@@ -414,36 +466,24 @@ UNO Q selects which gate drum to cycle per emitter based on: GPS position + pre-
 
 ## Bill of Materials
 
-| Component | Spec | Source | Est. Cost |
-|---|---|---|---|
-| Seeder arm body | Solid PETG, 10cm — no hollow channel needed | 3D print | Rs 25 filament |
-| Stepper hub + mount | PETG, Double-D bore for 28BYJ-48 shaft | 3D print | Rs 20 filament |
-| Stepper motor + driver | 28BYJ-48 5V + ULN2003 board, 4096 steps/rev | Robocraze | Rs 254 |
-| Punch solenoid | JF-0530B 12V DC, 5N, 10mm stroke, spring return | Amazon.in | Rs 433 |
-| Tip housing (hollow nose) | PETG, hollow bore 15mm, side tube socket, attaches to plunger | 3D print | Rs 25 filament |
-| Gate servo (seed release) | SG90 micro — rotates pocket drum 180° each way | Robu.in | Rs 80–100 |
-| Pocket drums (S/M/L) | PETG print, one per seed size, slide on SG90 D-shaft | 3D print | Rs 15 filament |
-| Vibration motor | Coin type 1034, 3–4V | Robocraze | Rs 25 |
-| IRLZ44N MOSFET | Logic-level N-ch, controls solenoid via D11 | Robu.in | Rs 39 |
-| 1N4007 diode | Flyback protection — 1× solenoid, 1× vibration motor | Amazon.in | Rs 20 |
-| Hopper body | PETG print, ~200ml capacity, feed throat + fixed drum housing at outlet | 3D print | Rs 45 filament |
-| Silicone seed tube | 14mm ID — gate outlet socket to tip socket, ~130mm | Industrial supply | Rs 40 |
-| Mounting hardware | M3 bolts, nuts, brass inserts | Local hardware | Rs 80 |
-| **Total** | | | **~Rs 1,050** |
+See [`bom.md`](bom.md) — that is the as-built list, kept current.
 
 ---
 
-## Software Architecture
+## Software Architecture ⚠️
+
+> **Built instead:** the split is real but the contents differ. The MCU does motor PWM, both servos, the timed
+> punch and the gyro — no camera loop, no moisture reading, no peak detection. The Linux side
+> runs the web console, the tube detector, the emitter model and the crop planner. There is
+> no RPi5, no mobile app and no GPS. See the diagram in the README.
 
 ### UNO Q — STM32 MCU Side (Real-Time)
 - Tube following PID loop (camera input → steering correction)
 - Moisture sensor reading at 10Hz
 - Peak detection state machine
-- Arm stepper control (28BYJ-48 via ULN2003, JMISC GPIO 1–4)
-- Step counting for arm angle (683 steps = 60°, max 300° forward then reverse)
-- Solenoid MOSFET control (D11 — extend 300ms, retract on release)
-- Gate drum control (A3 — SG90 rotates pocket 180°: fill→release→return per seed)
-- Vibration motor pulse (D13 via MOSFET — ~1s during each fill step, all crops)
+- Arm angle: S3003 servo on D10 (calibrated — physical 90° is servo command 64)
+- Solenoid MOSFET control (A3 — coil on 500 ms, then off)
+- Seed drum control (D11 — SG90 rotates the pocket: fill → release → return per seed)
 - Serial bridge to Linux side (event reporting)
 
 ### UNO Q — Linux/Qualcomm Side (AI)
@@ -454,14 +494,14 @@ UNO Q selects which gate drum to cycle per emitter based on: GPS position + pre-
 - WiFi sync to RPi5 server
 - Calibration routines
 
-### RPi5 Server
+### RPi5 Server ⬜
 - Seeding log storage (SQLite)
 - Germination correlation analysis (post-season)
 - Pattern config management and sync to UNO Q
 - Clogged emitter map generation
 - Mobile app API
 
-### Mobile App / WhatsApp
+### Mobile App / WhatsApp ⬜
 - Crop + pattern selection before run
 - Tip spring confirmation
 - Live progress (emitters completed / remaining)
@@ -470,7 +510,10 @@ UNO Q selects which gate drum to cycle per emitter based on: GPS position + pre-
 
 ---
 
-## Pre-Run Checklist (Farmer Flow)
+## Pre-Run Checklist (Farmer Flow) ⚠️
+
+> **Built instead:** the same idea, done in a web page the robot serves — no mobile app. There is no hopper
+> drum to swap for the demo crop.
 
 ```
 1. Attach seeder arm to rear mount          (30 seconds)
@@ -491,9 +534,9 @@ Robot runs fully autonomously from that point. Farmer can monitor progress in ap
 
 ---
 
-## Arm Support — Backup (build ONLY if the arm sags)
+## Arm Support — lazy-susan bearing ✅
 
-The seeder arm (100mm) cantilevers off the 28BYJ-48 stepper shaft, carrying the solenoid + tip (~120g) at the far end. The stepper's output shaft runs in a small plastic gearbox bushing not designed for sideways/overhung load. Possible effects:
+The seeder arm (100mm) cantilevers off the servo horn, carrying the solenoid + tip (~120g) at the far end. A servo's output shaft runs in a small gearbox bushing not designed for sideways/overhung load. Possible effects:
 - **Static sag** at the tip ≈ 1–2mm (borderline vs the ±2mm seeding tolerance).
 - **Cyclic wear** — the punch reaction pushes the tip up/down each cycle, slowly wearing the bushing so sag grows over time.
 
@@ -501,7 +544,7 @@ The seeder arm (100mm) cantilevers off the 28BYJ-48 stepper shaft, carrying the 
 
 ### If support is needed — lazy-susan turntable bearing
 
-A turntable (lazy-susan) bearing concentric with the stepper takes the arm's weight, the punch uplift, and the tilting moment off the fragile stepper shaft — with low rolling friction (important because the 28BYJ-48 is weak). It's the same idea as a **restaurant table spinner / microwave turntable**.
+A turntable (lazy-susan) bearing concentric with the servo takes the arm's weight, the punch uplift, and the tilting moment off the servo shaft, with low rolling friction. Same idea as a restaurant table spinner. **This is fitted.**
 
 How it handles both directions: the bearing's two plates are **captured** (crimped around the ball ring) so they spin but can't separate — resisting **down** (gravity) and **up** (punch reaction). The offset arm load becomes a down/up couple across the ball ring, which the captured raceway resists → no tilt.
 
@@ -512,8 +555,8 @@ How it handles both directions: the bearing's two plates are **captured** (crimp
    ═══════════════════════
    BASE PLATE (print) ──────── bolts to bearing BOTTOM plate corners
         │
-   stepper shaft passes UP through the open center → drives the carrier
-   (28BYJ-48 supplies torque only; bearing carries all the load)
+   servo shaft passes UP through the open centre → drives the carrier
+   (the servo supplies torque only; the bearing carries the load)
 ```
 
 **Buy:**
@@ -525,14 +568,17 @@ How it handles both directions: the bearing's two plates are **captured** (crimp
 > Confirmed suitable from product photo: open center (shaft passes through) + captured plates (spin but don't pull apart → resists punch uplift). No screws included — buy bolts separately.
 
 **Print (2 flat discs, ~40g total):**
-- **Arm carrier disc** (top) — bolts to bearing top plate; arm + stepper hub attach here; rotates.
-- **Base plate** (bottom) — bolts to bearing bottom plate; holds stepper centered below; fixes to seeder frame; static.
+- **Arm carrier disc** (top) — bolts to bearing top plate; arm + spool hub attach here; rotates.
+- **Base plate** (bottom) — bolts to bearing bottom plate; holds the servo centred below; fixes to the seeder frame; static.
 
 **Sequence to avoid rework:** buy the bearing first → measure its actual hole pattern + center → *then* design/print the two discs to fit it. Do not print the discs from guessed dimensions. SCAD for these is not yet created (deferred until the support is actually needed).
 
 ---
 
-## Known Limitations & Mitigations
+## Known Limitations & Mitigations ⚠️
+
+> **Built instead:** the real open limits are narrower than this list: the emitter model fires on plain tube,
+> and hard shadow across the row stops the tube detector until it clears.
 
 | Limitation | Mitigation |
 |---|---|
@@ -548,7 +594,7 @@ How it handles both directions: the bearing's two plates are **captured** (crimp
 
 ---
 
-## Future Enhancements
+## Future Enhancements ⬜
 
 | Enhancement | Complexity | Impact |
 |---|---|---|
