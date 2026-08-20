@@ -1,4 +1,4 @@
-# yaerbot — notes for Claude
+# yaerbot — operating notes
 
 Contest submission repo for the **Arduino Physical AI Challenge India 2026**: a farm
 **seeding robot** on an Arduino UNO Q. The 4-act demo plan and build status live in the
@@ -14,7 +14,12 @@ This file documents how the on-board pieces fit together and how to run/deploy t
 - `webchat/` — the **planner service** (server + chat UI); backend for the console's Plan tab.
 - `console/` — the **operator console** App Lab app (`assets/` = tabbed web UI incl. Plan;
   `python/main.py` = Socket.IO + RouterBridge RPCs; `app.yaml`, `sketch/sketch.yaml`).
-- `docs/`, `scripts/` (`bench_llm.py`, `gen_mock_prices.py`), `tests/`, `examples/`.
+- `scripts/` — `field_test.py` (drive calibration + run harness), `gen_schematic.py` /
+  `gen_arch.py` (the diagrams), `lock_focus.py` (pin the camera's focus),
+  `score_emitter_model.py` (grade a retrain), `bench_llm.py`, `gen_mock_prices.py`.
+- `docs/` — `bom.md`, `schematic/` (four sheets, generated), `architecture.svg`,
+  `seeder.md`, `ml-emitter-model.md`, `drive-precision.md`, `usb-camera.md`,
+  `troubleshooting.md`. `tests/` (214), `examples/` (the four acts, no hardware).
 
 ## The board (Arduino UNO Q, `ssh unoq` → `farm-os.local`, user `arduino`)
 - 4 GB RAM, 32 GB eMMC **partitioned**: `/` root ≈ 10 GB (tight, ~3 GB free) · **`/home/arduino`
@@ -51,7 +56,12 @@ This file documents how the on-board pieces fit together and how to run/deploy t
   deterministic card data, no LLM), `POST /api/narrate` (streams the LLM prose token-by-token),
   `GET /api/crops`. Standalone UI at `http://farm-os.local:8765`.
 - Env: `PLANNER_HOST` (0.0.0.0 for LAN), `PLANNER_MODEL` (default `qwen2.5:1.5b`),
-  `PLANNER_AFTER` (demo date), `PLANNER_LOCATION` (weather; default `salem`).
+  `PLANNER_AFTER` (**override only** — the window starts at today's date, resolved per
+  request; set this to reproduce a specific day), `PLANNER_LOCATION` (weather; default
+  `salem`).
+- The cached panchangam ends **2026-09-10**. Past that the planner returns nothing, and it
+  looks the same as a genuine "no favourable dates" answer. `/api/plan` reports the limit in
+  its `window` block (`cache_end`, `days_left`, `exhausted`) — check it before recording.
 
 ### 3) Operator console (`console/`) — the tabbed UI
 - App Lab app on the board at **`~/ArduinoApps/motor-control/`** (mounted into docker

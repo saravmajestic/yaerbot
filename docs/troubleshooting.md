@@ -289,7 +289,8 @@ does **not** survive being detached and re-attached at runtime. It wedges the MC
 **Fix:** `rpc_gateTest()` now **refuses** `SPOOL_PIN` and `DRUM_PIN` outright. Diagnose a
 servo through the Servo API (`indexSpool` / `dropSeed`), never by re-muxing its pin.
 
-**Recovery:** reflash the MCU (openocd — see CLAUDE.md recipe B), then
+**Recovery:** reflash the MCU (openocd — see the MCU-flash recipe in the ai-labs repo's
+`apps/farm-robot/CLAUDE.md`, recipe B), then
 `arduino-app-cli app start`. `app restart` alone does NOT reset a wedged MCU.
 
 > Related dead end: `gateTest` also reported `analogRead()` of the *driven* pin. That

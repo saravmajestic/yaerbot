@@ -198,7 +198,8 @@ Feeding the adapter from the robot's buck:
   **USB-A socket** from the buck and use a **USB-A → USB-C cable**, which carries the required
   56 kΩ pull-up per spec. Alternatively use a 5 V USB-C charger module that signals properly.
 - **Ground gets better, not worse.** Everything then shares the robot's single ground. The
-  CLAUDE.md ground-loop warning is about a *laptop's* USB being a separate ground domain;
+  ground-loop warning (see `AGENTS.md`) is about a *laptop's* USB being a separate ground
+  domain;
   powering from the robot's own buck removes that.
 - **Expect the board not to power off cleanly.** VBUS present at the USB-C port is what
   "keeps it from staying off". Shutdown stays: `sudo halt`, wait for the LED, cut the LiPo.

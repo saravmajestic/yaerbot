@@ -8,6 +8,11 @@ seed), _acts_ (seeds a plot — plain fixed-spacing or by following a drip line)
 > **yaer** — from **ஏர்** (_ēr_), the Tamil word for the plough: the tool that opened the
 > soil before sowing.
 
+**Contents** · [Why](#why) · [Architecture](#architecture) · [How the UNO Q is used](#how-the-uno-q-is-used) · [Status](#status) · [Repo layout](#repo-layout) · [Documentation](#documentation)
+
+Running it: [`AGENTS.md`](AGENTS.md) — the three services, in start order, and how to deploy
+a change to the board.
+
 ## Why
 
 Smallholders sow by hand, broadcasting the seed. That costs three ways:
