@@ -1,21 +1,44 @@
 # yaerbot — Farm OS seeding robot
 
-An autonomous seeding robot for the **Arduino Physical AI Challenge India 2026**, built on
-the **Arduino UNO Q**. It acts as an end-to-end agronomic agent: it _plans_ (what/when to
-seed), _acts_ (seeds a plot — plain fixed-spacing or by following a drip line), and _reports_
-(a pictorial map of what it planted).
+An autonomous seeding robot for the **Arduino Physical AI Challenge India 2026**, built on a
+single **Arduino UNO Q**. It _plans_ what and when to sow, _acts_ on either plain or
+drip-irrigated ground, and _reports_ a map of every seed it placed.
+
+**Two AI models run on the board itself, with no network:**
+
+- **A language model decides _when_ to sow** — **Qwen 2.5 (1.5B)** via Ollama, reasoning over
+  the Tamil panchangam, the biodynamic calendar and live weather. The dates come from a
+  deterministic reconciliation, so the model explains them rather than inventing them.
+- **A vision model decides _where_** — an **Edge Impulse FOMO** detector, trained on
+  photographs this robot took itself, finds the emitters along a drip line so every seed lands
+  where the water already reaches.
+
+On the same board, while it drives:
+
+- **OpenCV** finds the drip line and steers to keep the robot on it — a black tube on dark
+  soil, which is why it profiles brightness instead of looking for edges.
+- **A gyro** closes the loop on every turn: **0.3°** worst error across four consecutive 90°
+  turns, on ground whose grip changes as it goes.
+- **The microcontroller** times the seed punch to the millisecond, so a busy Linux side cannot
+  stretch how long a pulse-rated solenoid stays energised.
 
 > **yaer** — from **ஏர்** (_ēr_), the Tamil word for the plough: the tool that opened the
 > soil before sowing.
 
-**Contents** · [Why](#why) · [Architecture](#architecture) · [How the UNO Q is used](#how-the-uno-q-is-used) · [Status](#status) · [Repo layout](#repo-layout) · [Documentation](#documentation)
+**Contents** 
+- [Why](#why) 
+- [Architecture](#architecture) 
+- [How the UNO Q is used](#how-the-uno-q-is-used) 
+- [Status](#status) 
+- [Repo layout](#repo-layout) 
+- [Documentation](#documentation)
 
 Running it: [`AGENTS.md`](AGENTS.md) — the three services, in start order, and how to deploy
 a change to the board.
 
 ## Why
 
-Smallholders sow by hand, broadcasting the seed. That costs three ways:
+Farmers sow by hand, broadcasting the seed. That costs three ways:
 
 - **Seed** — it scatters unevenly, so you over-sow to make up for the gaps.
 - **Weeding** — scattered seed leaves no clean rows to weed between, so weeding stays slow
