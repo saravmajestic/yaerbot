@@ -1,7 +1,8 @@
 # yaerbot — notes for Claude
 
 Contest submission repo for the **Arduino Physical AI Challenge India 2026**: a farm
-**seeding robot** on an Arduino UNO Q. See `docs/demo-plan.md` for the 4-act demo + status.
+**seeding robot** on an Arduino UNO Q. The 4-act demo plan and build status live in the
+ai-labs repo: `ai-labs/apps/farm-robot/docs/farm-os/demo-plan.md`.
 This file documents how the on-board pieces fit together and how to run/deploy them.
 
 ## Repo layout
@@ -83,7 +84,8 @@ This file documents how the on-board pieces fit together and how to run/deploy t
   (one request) so the first on-camera answer isn't the ~15 s cold-load.
 
 ## References
-- Demo storyboard + build status: `docs/demo-plan.md`
-- On-device LLM findings (speed, lean prompt, model choice): `scripts/bench_llm.py`, demo-plan §B1
+- Demo storyboard + build status: `ai-labs/apps/farm-robot/docs/farm-os/demo-plan.md` (**ai-labs repo**, not this one)
+- On-device LLM findings (speed, lean prompt, model choice): `scripts/bench_llm.py`, and
+  the demo plan's §B1 in the ai-labs repo
 - Prices are **MOCK** (`farmos/planner/market.py`, loudly flagged) — real data.gov.in Agmarknet
   path is stubbed for a one-line swap. Weather is **real** (Open-Meteo, no key).

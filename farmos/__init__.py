@@ -1,6 +1,6 @@
 """farmos — the software brain for the yaerbot seeding robot.
 
-Modules are built act-by-act (see docs/demo-plan.md):
+Modules are built act-by-act:
   Act 2 — plain-land fixed-spacing seeding:  config -> path -> executor -> run log
   Act 4 — report:                            run log -> SVG farm map
 
