@@ -7,14 +7,20 @@ skid-steer robots that no amount of tuning removes.
 
 Read this before "fixing the trim" — trim was the wrong answer three times out of four.
 
+> **Status.** The turn problem this document opens with is **solved**: a gyro is fitted and
+> turns close the loop on measured angle (0.3° worst over four consecutive 90° turns). What
+> is still open-loop is **distance** (timed, no encoders) and **straight-line heading**
+> during a hop (`ltrim`). The three faults below are the ones worth knowing about, because
+> they cost a week and none of them was the trim.
+
 ---
 
 ## TL;DR
 
 | Want | Answer |
 |---|---|
-| Straight hops | trim + all four wheels gripping. A gyro removes the need for trim entirely. |
-| Accurate turns | **not achievable open-loop** beyond ~±5°. Lower turn duty + a deceleration ramp help; an IMU is the real fix. |
+| Straight hops | trim + all four wheels gripping. Still open-loop: the gyro corrects *turns*, and per-hop heading is measured and logged but not yet steered on. |
+| Accurate turns | **Solved.** A gyro is fitted and turns close the loop on measured angle: worst error **0.3°** across four consecutive 90° turns. Open-loop, this was never better than ~±5°. |
 | Accurate hop distance | timing works if dead time is calibrated; wheel encoders make it exact. |
 
 **One rule:** before adjusting any control parameter, prove the command reached the motors.
@@ -98,15 +104,18 @@ Use `scripts/field_test.py` on the board. Recalibrate after **any** mechanical o
 change — every value below is surface-, battery- and hardware-specific.
 
 ```bash
+# field_test.py lives in scripts/ — copy it to the app dir first, it is not deployed
+scp scripts/field_test.py unoq:/home/arduino/motor-control/python/
 FT="ssh unoq docker exec motor-control-main-1 python3 /app/python/field_test.py"
 
 # 0. sanity: does the MCU receive what we send?
 $FT diag
 
 # 1. forward: two durations -> cruise speed AND dead time
-$FT fwd 180 4 0.75      # measure distance
-$FT fwd 180 1.5 0.75    # measure distance
-$FT solve 4 <d_long> 1.5 <d_short>
+#    CALIBRATE AT THE DUTY THE ROBOT ACTUALLY RUNS AT — that is PWM 55 now, not 180.
+$FT fwd 55 30 0.83      # measure distance
+$FT fwd 55 10 0.83      # measure distance
+$FT solve 30 <d_long> 10 <d_short>
 
 # 2. turn: two durations at the LOW turn duty -> rate and coast
 $FT turn 120 1.5 right  # measure angle
@@ -131,18 +140,32 @@ turn:     time = turn_startup_s + angle/tdps          turn_startup_s < 0   (coas
 A dead time means *nothing happens at first*; a coast means *it keeps going after you
 stop*. If `tsolve` hands you a negative dead time, that's a coast — expected for turns.
 
-### Reference numbers (2026-08-11, hard floor, 3S ~12 V, after fixes 1 and 2)
+### Reference numbers — current (measured 2026-08-18 on soil)
 
-| Parameter | Value |
-|---|---|
-| `ltrim` | 0.75 (left 135 / right 180) |
-| `speed` | 0.616 m/s @ PWM 180 |
-| `startup` | 0.104 s |
-| `tpwm` | 120 |
-| `tdps` | 51 °/s |
-| `tstartup` | −0.75 s (≈38° coast) |
+Live values are in `CAL` in `console/python/main.py`. **Plot mode now drives at creep duty
+(PWM 55), the same speed as drip seeding**, so one calibration covers both kinds of run
+instead of two that can drift apart.
 
-→ a 40 cm hop is **0.75 s**; a 90° turn is **1.01 s**.
+| Parameter | Value | Note |
+|---|---|---|
+| `pwm` | 55 | forward duty for both plot and drip |
+| `speed` | 0.165 m/s | `fwd 55 30` → 5.00 m, `fwd 55 10` → 1.70 m |
+| `startup` | **−0.303 s** | negative at this duty — see below |
+| `ltrim` | 0.83 | |
+| `turn_pwm` | 120 | |
+| `tdps` | 45.2 °/s | |
+| `tstartup` | −0.80 s | ≈36° of coast |
+| `tramp` | 0.0 | ramp available, off |
+
+→ a 40 cm hop is **2.12 s**, not the 0.75 s of the PWM-180 era. A 5 m row takes about 30 s.
+Slower is also more accurate, less overshoot per stop — but PWM 55 is near the deadband, so
+watch for stiction on rough ground.
+
+**Why `startup` is negative here.** At PWM 180 it was a real dead time (+0.104 s: nothing
+happens at first). At PWM 55 the two-point fit comes out negative, which is not a dead time
+— it is the straight line through two slow runs having a negative intercept. Treat it as a
+fitted constant for this duty, not as physics. The older PWM-180 pair (speed 0.640,
+startup +0.187) is kept in the code comments so it is not lost.
 
 ---
 
@@ -185,7 +208,11 @@ protractor under the pivot point.
   easing off first shrinks the coast *and* its run-to-run scatter. There is still only one
   stop, and it happens slowly. Calibration is unaffected as long as the ramp is fixed.
 - **Battery compensation** — scales duty by `V_cal/V_now` to hold the calibrated speed
-  (symmetric: boosts a sagged pack, backs off a fresh one; clamped 0.75–1.5×).
+  (symmetric; clamped 0.75–1.5×). **Currently inoperative:** the divider was on A4, which
+  the gyro took, so `BATT_PRESENT 0` and every run passes `nobatt`. The gain is 1.0.
+- **Closed-loop turns** — `pivotDeg` on the MCU drives until the measured rotation reaches
+  target, so coast and surface stop mattering: the result is measured, not predicted.
+  Worst error 0.3° across four consecutive 90° turns.
 - **`getDiag` self-checking** — after every move, compares what we sent against what the
   MCU latched and drove, and prints a `!!` banner on mismatch. Catches a broken command
   path *before* you start blaming control parameters.
@@ -195,16 +222,21 @@ protractor under the pivot point.
 - **Fewer turns.** Every turn is an error source. Run rows along the **long** axis of the
   plot. A serpentine alternates turn direction between ends, so systematic overshoot
   partly cancels across a full cycle — but *not* within one row change (see below).
-- **Auto-calibrate per surface.** Once an IMU is fitted, command a known 360° at the start
-  of a run, measure it, and derive that surface's rate and coast. Removes
-  "calibrated indoors, ran outdoors" completely.
-- **Closed-loop heading** — the real prize; see hardware.
+- **Auto-calibrate per surface, at the start of a run.** Half done: the MCU already learns
+  pivot coast run-to-run with an exponential average, so it adapts to the ground it is on.
+  What is missing is a deliberate known-angle turn at the start of a run to seed it — and
+  **the learned coast is lost on reboot**, so the first turn after a power cycle uses the
+  built-in guess.
+- **Steer on heading during a straight hop.** The gyro closes the loop on turns; a hop is
+  still open-loop with `ltrim`. Per-hop yaw is measured and logged, but nothing acts on it.
 
-### The row change is the precision bottleneck
+### The row change was the precision bottleneck ✅ **largely solved**
 
 `A → B` (row), `B → B1` (**90°, row gap, 90°**), `B1 → C` (next row). **Both turns go the
-same way**, so a *systematic* per-turn overshoot **doubles**: 10° per turn leaves the next
-row 20° skew. Consequences:
+same way**, so a *systematic* per-turn overshoot **doubles**: 10° per turn left the next row
+20° skew. That was the open-loop failure. Closing the loop on the gyro takes the per-turn
+error to about 0.3°, so the doubling is now under a degree. The geometry lesson still holds
+for anything that stays open-loop:
 
 - Tune the row change **as one primitive** (`field_test.py uturn`), not as two 90° turns.
   Its two outputs are separately measurable — heading (are the legs parallel?) and lateral
@@ -216,22 +248,24 @@ row 20° skew. Consequences:
 
 ## Hardware solutions, ranked by value per rupee
 
-> **What is actually fitted is listed in [`bom.md`](bom.md).** The gyro below is now on the
-> robot, on A4/A5 via `Wire2`; wheel encoders are not.
-> Short version of what changed after checking the UNO Q's own capabilities: the board
-> has **no onboard IMU**, but it has a **Qwiic connector**, and Arduino's
-> **Modulino Movement** (ABX00101, LSM6DSOXTR 6-axis) is a plug-in IMU with **no
-> soldering and zero GPIO cost** — preferred over a hand-wired MPU-6050 because
-> hand-made joints are what have cost this project the most. For distance, **AS5600
-> ×2 behind a Modulino Hub** (TCA9548A mux, needed because AS5600's address is fixed)
-> keeps encoders off the GPIO budget, of which **exactly one pin is free**.
+> **What was actually fitted:** a hand-wired **MPU-6050 on A4/A5** via `Wire2`. No wheel
+> encoders.
+>
+> The plan below preferred a **Modulino Movement** on the Qwiic connector — no soldering, no
+> GPIO cost. It went the other way for one reason: **the header pins marked SDA/SCL do not
+> work for I²C on this core**, and `Wire2` on A4/A5 is the only solderable I²C the board has.
+> Qwiic (`Wire1`/i2c4) does work but needs a JST-SH cable. A4/A5 were already spoken for, so
+> the gyro cost the battery monitor its input — see [`bom.md`](bom.md).
 
-### 1. IMU — highest value
+### 1. IMU — highest value ✅ **done**
 
-**MPU6050** on the free `SDA`/`SCL` pins (both untouched; `A5` is the only free analog pin).
-Use the **gyro only**: integrate yaw rate and turn until the measured angle reaches target.
+**MPU-6050 on A4/A5** (`Wire2`). Not the header `SDA`/`SCL` pins — those have no I²C
+peripheral behind them on this core, so a bus scan there finds nothing however correct the
+wiring looks.
+
+Uses the **gyro only**: integrate yaw rate and turn until the measured angle reaches target.
 Gyro drift is irrelevant over a 1–2 s turn. Coast stops mattering because you measure the
-result instead of predicting it.
+result instead of predicting it. This is what took turns from ±5–10° to 0.3°.
 
 ```
 target = 90°
@@ -240,12 +274,13 @@ while |target − measured| > 2°:
 stop, settle, re-read; one micro-correction if still out
 ```
 
-Surface-independent, battery-independent, self-correcting. **It also removes the need for
-trim** — hold heading during a straight hop instead of guessing `ltrim`. For production use
+Surface-independent, battery-independent, self-correcting. It **could** also remove the need
+for trim by holding heading during a straight hop — that part is not built; hops still use
+`ltrim`. For production use
 a **BNO085/BNO055** (~₹1500–2500): on-chip fusion, absolute heading, no hand-rolled drift
 maths. Mount on foam, away from the motors.
 
-### 2. Wheel encoders — for distance, not for heading
+### 2. Wheel encoders — for distance, not for heading ⬜ **not fitted**
 
 Be clear what they buy: in a skid-steer the wheels **slip by design during a turn**, so
 heading derived from wheel difference is unreliable exactly when you need it. Encoders fix
@@ -256,7 +291,7 @@ one digital pin, poll it (~30–50 pulses/s at our speed — no interrupt needed
 wheel with 20 slots gives ~1 cm per pulse. Best implemented as a `driveDistance(pulses)`
 RPC so the MCU closes the loop itself.
 
-### 3. Mechanical
+### 3. Mechanical — partly done
 
 - **Wheelbase vs track.** A skid-steer with a *long* wheelbase relative to its track (32 cm
   here) scrubs hard and resists turning. Aim for wheelbase ≤ track.
@@ -270,9 +305,10 @@ RPC so the MCU closes the loop itself.
 ### Production stack
 
 ```
-distance  ← wheel encoders        (closed-loop hops)
-heading   ← IMU gyro, fused       (closed-loop turns + straight-line hold)
-position  ← RTK GPS               (only if the field needs absolute reference)
+distance  ← wheel encoders        (closed-loop hops)      ⬜ not fitted — still timed
+heading   ← IMU gyro              (closed-loop turns)     ✅ fitted, turns only
+          ← ... + straight-line hold                      ⬜ not built — hops use ltrim
+position  ← RTK GPS               (absolute reference)    ⬜ deliberately not used
 ```
 
 ---
@@ -299,9 +335,10 @@ position  ← RTK GPS               (only if the field needs absolute reference)
 
 ## See also
 
-- [`bom.md`](bom.md) — parts identified to close these gaps
-- `docs/farm-os/wheel-encoder-build.md` — build/mount/wire the distance encoder
-- `docs/farm-os/troubleshooting.md` — connector, network and flashing failures
+- [`bom.md`](bom.md) — what is actually fitted
+- [`troubleshooting.md`](troubleshooting.md) — connector, network and flashing failures
+- `apps/farm-robot/docs/farm-os/wheel-encoder-build.md` in the **ai-labs** repo — how to
+  build and mount a distance encoder, if one is ever fitted
 - `apps/farm-robot/docs/farm-os/uno-q-wiring.md` in the **ai-labs** repo — pinout as it
   stood then. Superseded: the IMU went on **A4/A5** (`Wire2`), not the header SDA/SCL pins,
   which have no I2C peripheral behind them. Current sheets: `docs/schematic/`
