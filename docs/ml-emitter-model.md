@@ -5,17 +5,26 @@ collected, labelled, trained, and how the model actually reaches the robot. Ever
 below is verified on hardware unless marked otherwise — most of it was learned the hard
 way on 2026-08-15/16.
 
-> **Why this model exists:** it turns emitter detection from classical CV into an
-> on-device *learned* model — the strongest "Physical AI" claim for the contest.
-> `vision/detect_emitter` (Canny/Hough width-bump) stays as the automatic fallback, so
-> nothing is blocked if the model underperforms.
+> **Why this model exists:** classical CV could not tell an emitter from the tube it sits on.
+> A learned model can, and it runs on the board. `vision/detect_emitter` stays as the automatic
+> fallback, so nothing is blocked if the model underperforms.
+
+> **Current state, 2026-08-19.** Deployed model is **v8** (§4), bound in `app.yaml`, gate
+> `_EMIT_CONF = 0.60`. v8 closed the mid-frame blind spot: 7 of 19 frames now detect in the
+> middle of frame against 0 before, which is what gives the robot room to stop.
+> **The open problem is false positives on plain tube**, which is why a 12-emitter row draws
+> about 14 stops. Fixing it needs negatives in the training set, not another threshold change.
+>
+> Also note the camera changed: frames are now **320×240 from a USB webcam seeing 43cm of
+> ground**, not the ESP32-CAM's 22cm. Fire-rate figures measured before the swap are not
+> comparable with ones measured after it.
 
 ---
 
 ## 0. The pipeline at a glance
 
 ```
-ESP32-CAM ──MJPEG──> UNO Q Linux ──> _cam_loop ──> detect_emitter_ml()
+USB camera ──V4L2──> UNO Q Linux ──> _cam_loop ──> detect_emitter_ml()
                                                         │  (falls back to
                                                         │   classical CV)
                                         HTTP :1337 ─────┘
@@ -60,9 +69,10 @@ ssh unoq 'rm -f /home/arduino/motor-control/captures/cap_*.jpg'
   on container restart and will not notice a manual `rm`. Trust `ls | wc -l`.
 - **Watch the count, not the clock.** If it stops climbing the stream has died and you
   are recording nothing. At a 2 s interval it should rise ~30/minute.
-- The ESP32-CAM link is the limiting factor, not disk (15 GB free ≈ 250k frames). Its
-  firmware has **no WiFi rejoin loop** until `esp32_cam.ino` is flashed, so a dropped
-  association is permanent until power-cycled.
+- Neither the link nor the disk is the limit any more (15 GB free ≈ 250k frames). The USB
+  camera delivers a steady 30 fps, so the capture interval is the only thing setting the rate.
+  *(Historical: over the ESP32-CAM's WiFi MJPEG the link was the limit, and a dropped
+  association was permanent until power-cycle unless `esp32_cam.ino` had been flashed.)*
 - **Match capture conditions to demo conditions** — same time of day, sun angle, soil
   moisture. A model this narrow will not generalise, which is a fine trade for a single
   take, but only if the take looks like the training data.
@@ -142,8 +152,16 @@ the model proposes rather than only what clears our gate:
 > sits ~16px from one. The conclusion was never revisited after the zoom.
 >
 > **What survives:** a **73% fire rate** with a **0.916 median** and no gap in the distribution
-> is still a real problem and still justified the retrain. What does not survive is "it fires
-> confidently on bare tube", and the practical consequence is in the `_EMIT_CONF` note below.
+> is still a real problem and still justified the retrain.
+>
+> **⚠️ RE-ESTABLISHED 2026-08-19 — the withdrawal above was too broad.** Only the claim about
+> *that one frame* was wrong. "It fires on bare tube" is true, and it is now the accepted root
+> cause of the emitter count being wrong: **three boxes at up to 0.97 on a frame holding plain
+> tube and no emitter**, plus **145 boxes across 60 frames of leaf litter**. A 12-emitter row
+> draws about 14 stops because of it. The operator raised this days before it was accepted, and
+> the retraction above cost roughly ten iterations of counting logic that could not have worked.
+> **The counting logic is frozen until the model is retrained with plain-tube and leaf-litter
+> negatives.**
 >
 > **The lesson worth keeping:** these emitters are 4-6px features. *Never judge a detection from
 > a full-frame view* — crop and upscale around the predicted centroid before deciding it is
@@ -167,7 +185,9 @@ has **not** worked if everything merely scores lower — that just slides the ov
 
 ---
 
-## 5. Retrained model — 2026-08-18 (deploy_version 6, `squash`)
+## 4. Retrain history
+
+### v6 — 2026-08-18 (`squash`)
 
 Scored on `captures/dense/` — 298 frames sampled from a 2086-frame pass captured AFTER the
 training set was labelled, so a genuine held-out set.
@@ -178,15 +198,26 @@ training set was labelled, so a genuine held-out set.
 | median confidence | 0.916 | 0.875 |
 | resize mode | fit-shortest | **squash** |
 
-**38% is consistent with the geometry rather than evidence of over-firing.** Emitters ~40cm
-apart against a 22cm visible strip means ~55% of frames should contain one, so the model fires
-slightly *under* the expected rate. High-confidence detections land on salt crust, i.e. on a real
+**38% was consistent with the geometry rather than evidence of over-firing** — *for the camera
+of the time*. Emitters ~40cm apart against a **22cm** visible strip means ~55% of frames should
+contain one, so the model fired slightly *under* the expected rate.
+**This arithmetic is now stale:** the QHM-999RL sees **43cm** of ground, wider than the 40cm
+spacing, so nearly every frame should hold an emitter. Any fire-rate scored before the camera
+swap cannot be compared with one scored after it. High-confidence detections land on salt crust, i.e. on a real
 feature.
 
-### `_EMIT_CONF` is probably too high now — VALIDATE IT ON THE NEXT DRY RUN
+### `_EMIT_CONF` — settled at 0.60
 
-The plant trigger needs a detection in the lower 45% of frame (`_EMIT_MIN_Y_FRAC`) **and**
-confidence ≥ `_EMIT_CONF`. On the held-out set:
+> **Answered.** This section asked for a dry-run validation; it happened. `_EMIT_CONF` is
+> **0.60**, not the 0.80 below. v8's confidences on real emitters run 0.66–1.00 with a median
+> near 0.97, so a higher gate is tempting — but the two lowest (0.66, 0.79) are exactly the
+> frames v6 missed entirely, so **0.60 is what buys the recall**, and with zero measured false
+> positives on the fixture sets there was nothing to trade it against. Do not raise it on a
+> distribution. The reasoning is pinned in `tests/test_emitter_e2e.py`.
+
+The historical arithmetic that prompted the question, kept because it shows the method: the
+plant trigger needs a detection in the lower 45% of frame (`_EMIT_MIN_Y_FRAC`) **and**
+confidence ≥ `_EMIT_CONF`. On the v6 held-out set:
 
 ```
 fired in the reach band : 76 / 298 (26%)   median confidence 0.843
@@ -202,8 +233,8 @@ And note *why* 0.90 was chosen: to reject three "false positives on plain tube" 
 0.57 / 0.77 / 0.87 — and at least one of those frames contained real emitter holes (see the
 correction above). **The gate was set high partly on misread evidence.**
 
-`_EMIT_CONF` is now **0.80**. To validate it, run a drip dry run **with dataset capture ON** and
-check both directions:
+At the time `_EMIT_CONF` was set to **0.80**. To validate it, the method was: run a drip dry run
+**with dataset capture ON** and check both directions:
 
 * **Too high** → the robot walks past emitters. Only visible if you have continuous frames,
   because a skipped emitter leaves no `emitN_latM` frame behind. This is why capture matters:
@@ -213,9 +244,33 @@ check both directions:
 Each stop logs its confidence, so the log plus the captures answer it in one run:
 `emitter 3 — STOPPED at 1.24m (conf 0.86, ml 0.86, y=181/240) [frame emit3_lat1_HHMMSS.jpg]`
 
+### v8 — 2026-08-19 · **this is the deployed model**
+
+`ei-deployment-version 8`. Scored against the 19 saved `emitN_latM` frames and the fixture
+sets in `tests/frames/`:
+
+| | v6 | **v8** |
+|---|---|---|
+| gained / lost detections | — | **+3 / −0** |
+| detections in the **middle** of frame | **0** | **7 of 19** |
+| frames detected, of 19 | 15 | **18** |
+| boxes on 17 no-emitter frames | — | **0** |
+
+**The number that mattered was position, not confidence.** Under v6 every confident detection
+sat at `y ≥ 190` — the point where the emitter is nearest and largest — which left the robot
+almost no room to stop. v8 spreads them: far 1, mid 7, near 10. Seven mid-frame detections
+against none is the blind spot closing, and it is why retraining beat another threshold tweak.
+
+Pinned as a regression baseline in `tests/test_emitter_e2e.py`, with the per-frame before/after
+table. Re-baseline deliberately when the model changes on purpose — never to make a red test
+green.
+
+**Still open in v8:** it fires on plain tube (see the correction in §3). That is the next
+retrain's job, and it needs negatives.
+
 ---
 
-## 4. Deploy
+## 5. Deploy
 
 **Deployment target: `Arduino UNO Q`** — *"An EIM binary for the Arduino UNO Q CPU"*.
 
@@ -270,11 +325,16 @@ App Lab also offers `arduino:video_object_detection`. **Do not use it here.** It
 `brick_config.yaml` declares `required_devices: [camera]` and its runner is started with
 `--mode streaming --camera /dev/video1`:
 
-- our camera is an **ESP32-CAM over WiFi MJPEG** — there is no local `/dev/video*` to give it
-- it would **own the stream** and emit its own annotated video, bypassing `_cam_loop`,
-  which is deliberately the *sole consumer*: the same frame feeds tube-steering, the
-  emitter detector, dataset capture and the browser overlay
-- `object_detection` takes **image bytes**, which is exactly what we have
+- it would **own the stream** and emit its own annotated video, bypassing `_cam_loop`, which
+  is deliberately the *sole consumer*: one frame feeds tube-steering, the emitter detector,
+  dataset capture and the browser overlay. That is the reason that still holds.
+- `object_detection` takes **image bytes**, which is exactly what `_cam_loop` already has
+- it hardcodes a camera index, and **`/dev/video` indices are not stable across boots** on
+  this board, so a pinned `--camera /dev/video1` is a coin flip
+
+> **One original reason has expired.** This used to read "there is no local `/dev/video*` to
+> give it" — true of the ESP32-CAM over WiFi, false now that the camera is USB. The decision
+> stands on sole-consumer ownership and the unstable index, not on the device node.
 
 > **"Video" does not mean de-blurred.** That brick runs the same model on the same
 > individual frames — the word describes input plumbing and streaming output, not
@@ -287,23 +347,32 @@ App Lab also offers `arduino:video_object_detection`. **Do not use it here.** It
 
 ```yaml
 bricks:
-  - arduino:web_ui
-  - arduino:object_detection      # requires_container: true -> starts ei-obj-detection-runner
+- arduino:web_ui: {}
+- arduino:object_detection:
+    model: ei-model-1088852-1     # id from: curl 127.0.0.1:8800/v1/models
 ```
+
+**The entries are mappings, and `model:` is the whole point.** Without it App Lab starts the
+runner with the out-of-the-box `yolo-x` and serves 80 COCO classes. Because the binding lives
+in `app.yaml` rather than being clicked in the UI, it survives `app start` and a reboot.
+
+**Failure is silent** — the app runs, the runner reports healthy, and nothing looks wrong.
+Always verify the labels (§6).
 
 ---
 
-## 5. Enable and verify
+## 6. Enable and verify
 
-**The ML path is OFF by default.** `emitter_ml.py` gates the whole brick import behind
-an env var, because constructing the brick with no model blocks ~60 s trying to reach
-the runner:
+**The ML path is ON by default.** `emitter_ml.py` still gates the brick import behind an env
+var — constructing the brick with no model blocks ~60 s trying to reach the runner — but the
+default is now enabled:
 
 ```bash
-FARMOS_EMITTER_ML=1
+FARMOS_EMITTER_ML=0     # force the classical detector instead
 ```
 
-Without it `ml_available()` stays `False` and the console silently uses classical CV.
+Set to `0`/`false`/`no`/`off` and `ml_available()` stays `False`, and the console silently uses
+classical CV.
 
 Restart the app, then confirm from the camera-loop log line:
 
@@ -322,7 +391,7 @@ ssh unoq 'curl -s http://127.0.0.1:1337/api/info' | head -20
 
 ---
 
-## 6. Gotchas that cost real time
+## 7. Gotchas that cost real time
 
 ### The detect() response shape — three traps
 
@@ -355,12 +424,17 @@ Two thresholds stack, and the arithmetic bites on dry soil:
 
 ```
 fused = 0.6 * ml_value + (0.4 if wet else 0.0)      # detect_emitter_ml
-plant if fused >= _EMIT_CONF (0.55)                 # console
+plant if fused >= _EMIT_CONF (0.60)                 # console
 ```
 
-A **visual-only** detection maxes at **0.6**. So a 0.9-confidence emitter on dry soil
-scores **0.54 and does not trigger a plant.** If the annotated view shows clean
-detections but nothing plants, this is why — not the model.
+A **visual-only** detection maxes at **0.6**, so a 0.9-confidence emitter on dry soil scored
+0.54 and never triggered. If the annotated view shows clean detections but nothing plants, this
+is the arithmetic to check — not the model.
+
+> **The wet bonus is now deliberately bypassed.** The moisture pins are floating, and a floating
+> pin reads *below* the 9000 "wet" threshold, so every frame was collecting the +0.4 for free —
+> which is worse than useless, it is a confidence bonus keyed to nothing. `main.py` now passes
+> moisture as `None` so `wet` stays `False`. Confidence is the model's own number.
 
 ### Fallback workaround (no USB)
 
