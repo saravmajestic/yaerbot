@@ -216,7 +216,8 @@ row 20° skew. Consequences:
 
 ## Hardware solutions, ranked by value per rupee
 
-> **Parts identified to close these gaps are listed in [`bom.md`](bom.md)** → "Identified for the next revision".
+> **What is actually fitted is listed in [`bom.md`](bom.md).** The gyro below is now on the
+> robot, on A4/A5 via `Wire2`; wheel encoders are not.
 > Short version of what changed after checking the UNO Q's own capabilities: the board
 > has **no onboard IMU**, but it has a **Qwiic connector**, and Arduino's
 > **Modulino Movement** (ABX00101, LSM6DSOXTR 6-axis) is a plug-in IMU with **no

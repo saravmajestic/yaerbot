@@ -1,12 +1,10 @@
 # Bill of Materials — as built
 
-Everything physically fitted to the robot that produced the demo, as of **2026-08-19**. Pin
-assignments below are taken from `firmware/farm_os/farm_os.ino`, not from memory. The circuit
-schematics are in [`schematic/`](schematic/index.html) (open `index.html`); the seeder mechanism is
-in [`seeder.md`](seeder.md).
+Everything physically fitted to the robot that produced the demo, as of **2026-08-19**. The
+circuit schematics are in [`schematic/`](schematic/index.html) (open `index.html`); the seeder
+mechanism is in [`seeder.md`](seeder.md).
 
-Prices are indicative Indian retail (₹, 2026). A dash means the item was already owned or came as
-part of a kit, so no separate price is meaningful.
+Prices are indicative Indian retail (₹, 2026).
 
 ## Compute & sensing
 
@@ -130,11 +128,3 @@ the wiring is. `Wire2` (i2c3) is on **A4/A5**, and that is the only solderable I
 | **GPS + compass (BN-880)** | Consumer GPS is ±2–5 m; the demo plot is 3–6 m across, so it would be **less** accurate than dead reckoning, and it gives no heading at rest. The problem is plot-scale *relative* odometry, not absolute position. |
 | **Stepper (28BYJ-48) for the arm** | Superseded by the S3003 servo — absolute positioning, fewer pins, no driver board. |
 | **Header SDA/SCL pins for I2C** | Not a choice — they are electrically dead for I2C on this core. See above. |
-
-## Identified for the next revision
-
-| Item | Fixes / adds |
-|---|---|
-| **Second solenoid + punch tip** | The arm carries **2 outlets 180° apart** but only **one** punch is fitted, so half the arm's designed throughput is unused. |
-| **Wheel encoders** (slot sensor + a disc/hub to print) | Measured distance instead of timed dead reckoning. Note encoders do **not** fix heading on a skid-steer — wheels slip by design in a pivot; that is the gyro's job. |
-| **ADS1115** 16-bit ADC over I2C | Restores the battery monitor **and** the current sense without needing a free analog pin — the cleanest way to undo what the gyro cost. |
