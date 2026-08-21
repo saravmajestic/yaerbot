@@ -15,6 +15,11 @@ drip-irrigated ground, and _reports_ a map of every seed it placed.
 </p>
 
 <p align="center">
+  <img width="1600" height="702" alt="image" src="https://github.com/user-attachments/assets/88a0d711-914b-43ae-9766-9d723e39c868" />
+
+</p>
+
+<p align="center">
   <b>▶ <a href="https://www.youtube.com/watch?v=LSY9eQG0oHc">Watch the demo</a></b>
   &nbsp;·&nbsp; 4 min 25 s &nbsp;·&nbsp; the planner, the seeder built by hand, and both seeding modes in the field
 </p>
